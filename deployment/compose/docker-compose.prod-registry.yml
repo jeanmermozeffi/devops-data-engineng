@@ -1,0 +1,55 @@
+# ============================================================================
+# Docker Compose - Surcharge PROD (Registry)
+# Configuration spécifique pour l'environnement de production
+# ============================================================================
+#
+# USAGE:
+#   docker-compose -f docker-compose.registry.yml -f docker-compose.prod-registry.yml up -d
+#
+# ============================================================================
+
+services:
+    cicbi-api:
+        ports:
+            - "8000:80"
+
+        environment:
+            - ENVIRONMENT=prod
+            - LOG_LEVEL=INFO
+            - RELOAD=false
+
+        # Pas de DNS personnalisés - utilise les DNS du daemon Docker (resolver système)
+        # Les DNS publics (1.1.1.1, 8.8.8.8) peuvent être bloqués par certains datacenters
+
+        # Configuration Traefik (si utilisé)
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.cicbi-api-prod.rule=Host(`api.cicbi.prod`)"
+            - "traefik.http.routers.cicbi-api-prod.entrypoints=websecure"
+            - "traefik.http.routers.cicbi-api-prod.tls.certresolver=letsencrypt"
+            - "traefik.http.services.cicbi-api-prod.loadbalancer.server.port=80"
+
+        # Limites de ressources en production
+        deploy:
+            resources:
+                limits:
+                    cpus: '2'
+                    memory: 2G
+                reservations:
+                    cpus: '1'
+                    memory: 1G
+
+    redis:
+        # Port Redis non exposé en production (sécurité)
+        ports: []
+
+        # Limites de ressources
+        deploy:
+            resources:
+                limits:
+                    cpus: '0.5'
+                    memory: 512M
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
+

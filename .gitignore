@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.Python
+
+# DevOps - Déploiements temporaires
+.tmp-deployments/
+
+# Fichiers sensibles (tokens, secrets)
+.env
+.env.local
+*.key
+*.encrypted
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Sauvegardes
+*.backup
+*.bak
+*.tar.gz
+cicbi-deployment-package/
+packages/
+packages/

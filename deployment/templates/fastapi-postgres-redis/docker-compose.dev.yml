@@ -1,0 +1,20 @@
+# Docker Compose - Development Overrides
+# Stack: FastAPI + PostgreSQL + Redis
+
+services:
+  api:
+    ports:
+      - "${DEV_PORT:-8001}:80"
+    environment:
+      - ENVIRONMENT=dev
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+    command: uvicorn main:app --host 0.0.0.0 --port 80 --reload
+
+  postgres:
+    ports:
+      - "${POSTGRES_DEV_PORT:-5432}:5432"  # Exposé pour debug/pgAdmin
+
+  redis:
+    ports:
+      - "${REDIS_DEV_PORT:-6379}:6379"  # Exposé pour debug

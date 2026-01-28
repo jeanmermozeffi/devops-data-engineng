@@ -1,0 +1,33 @@
+# Docker Compose - Staging Overrides
+# Stack: FastAPI + Redis
+
+services:
+  api:
+    ports:
+      - "${STAGING_PORT:-8002}:80"
+    environment:
+      - ENVIRONMENT=staging
+      - LOG_LEVEL=INFO
+      - WORKERS=4
+    command: uvicorn main:app --host 0.0.0.0 --port 80 --workers 4
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.${PROJECT_NAME}-staging.rule=Host(`${STAGING_DOMAIN:-api.staging.localhost}`)"
+      - "traefik.http.services.${PROJECT_NAME}-staging.loadbalancer.server.port=80"
+
+  redis:
+    ports:
+      - "${REDIS_STAGING_PORT:-6381}:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M

@@ -1,0 +1,21 @@
+# Docker Compose - Development Overrides
+# Stack: FastAPI + Redis
+
+services:
+  api:
+    build:
+      args:
+        - ENABLE_RELOAD=true
+    ports:
+      - "${DEV_PORT:-8001}:80"
+    environment:
+      - ENVIRONMENT=dev
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+    command: uvicorn main:app --host 0.0.0.0 --port 80 --reload
+    labels:
+      - "traefik.enable=false"
+
+  redis:
+    ports:
+      - "${REDIS_DEV_PORT:-6379}:6379"  # Exposé pour debug

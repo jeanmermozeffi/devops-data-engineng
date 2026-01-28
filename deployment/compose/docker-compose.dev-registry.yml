@@ -1,0 +1,30 @@
+# ============================================================================
+# Docker Compose - Surcharge DEV (Registry)
+# Configuration spécifique pour l'environnement de développement
+# ============================================================================
+#
+# USAGE:
+#   docker-compose -f docker-compose.registry.yml -f docker-compose.dev-registry.yml up -d
+#
+# ============================================================================
+
+services:
+    cicbi-api:
+        ports:
+            - "8001:80"
+
+        environment:
+            - ENVIRONMENT=dev
+            - LOG_LEVEL=DEBUG
+            - RELOAD=true
+
+        # Pas de DNS personnalisés - utilise les DNS du daemon Docker (resolver système)
+        # Les DNS publics (1.1.1.1, 8.8.8.8) sont bloqués par le datacenter
+
+        labels:
+            - "traefik.enable=false"  # Pas de Traefik en dev
+
+    redis:
+        ports:
+            - "6379:6379"  # Port exposé en dev pour debug
+

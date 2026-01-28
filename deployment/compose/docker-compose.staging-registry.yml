@@ -1,0 +1,53 @@
+# ============================================================================
+# Docker Compose - Surcharge STAGING (Registry)
+# Configuration spécifique pour l'environnement de pré-production
+# ============================================================================
+#
+# USAGE:
+#   docker-compose -f docker-compose.registry.yml -f docker-compose.staging-registry.yml up -d
+#
+# ============================================================================
+
+services:
+    cicbi-api:
+        ports:
+            - "8002:80"  # Port 8002 pour staging (8000=prod, 8001=dev, 8002=staging)
+
+        environment:
+            - ENVIRONMENT=staging
+            - LOG_LEVEL=INFO
+            - RELOAD=false
+            
+        # Configuration Traefik (si utilisé)
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.cicbi-api-staging.rule=Host(`api.cicbi.staging`)"
+            - "traefik.http.routers.cicbi-api-staging.entrypoints=websecure"
+            - "traefik.http.routers.cicbi-api-staging.tls.certresolver=letsencrypt"
+            - "traefik.http.services.cicbi-api-staging.loadbalancer.server.port=80"
+
+        # Limites de ressources pour staging (moins que prod)
+        deploy:
+            resources:
+                limits:
+                    cpus: '1'
+                    memory: 1G
+                reservations:
+                    cpus: '0.5'
+                    memory: 512M
+
+    redis:
+        # Port Redis exposé pour debug en staging
+        ports:
+            - "6380:6379"
+
+        # Limites de ressources
+        deploy:
+            resources:
+                limits:
+                    cpus: '0.5'
+                    memory: 256M
+                reservations:
+                    cpus: '0.25'
+                    memory: 128M
+

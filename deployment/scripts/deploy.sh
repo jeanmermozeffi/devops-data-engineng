@@ -1,0 +1,1551 @@
+#!/bin/bash
+
+# ============================================================================
+# DevOps - Docker Management CLI
+# Description: Script avancé de gestion Docker pour environnements Dev & Prod
+# Usage: ./deploy.sh <command> <environment> [options]
+# ============================================================================
+
+set -e  # Exit on error
+
+# ============================================================================
+# CONFIGURATION & COULEURS
+# ============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Charger la configuration depuis .devops.yml
+source "$SCRIPT_DIR/config-loader.sh"
+load_devops_config
+
+# Si PROJECT_ROOT n'est pas défini (ancien comportement), utiliser ../..
+if [ -z "$PROJECT_ROOT" ]; then
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    export PROJECT_ROOT
+fi
+
+cd "$PROJECT_ROOT"
+
+# COMPOSE_PROJECT_NAME est maintenant chargé depuis .devops.yml
+# Pas de valeur par défaut - utilise celle de config-loader.sh
+
+# ============================================================================
+# FONCTIONS D'AFFICHAGE
+# ============================================================================
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[✓]${NC} $1"
+}
+
+log_header() {
+    echo -e "\n${CYAN}========================================${NC}"
+    echo -e "${WHITE}$1${NC}"
+    echo -e "${CYAN}========================================${NC}\n"
+}
+
+print_separator() {
+    echo -e "${CYAN}----------------------------------------${NC}"
+}
+
+# ============================================================================
+# CONFIGURATION PROFILS REGISTRY
+# ============================================================================
+
+# Dossier des profils registry (partagé avec registry.sh)
+PROFILES_DIR="$SCRIPT_DIR/.registry-profiles"
+CURRENT_PROFILE=""
+LAST_PROFILE_FILE="$SCRIPT_DIR/.last-registry-profile"
+
+# Charger le dernier profil utilisé si disponible (UNIQUEMENT les credentials)
+if [ -f "$LAST_PROFILE_FILE" ]; then
+    CURRENT_PROFILE=$(cat "$LAST_PROFILE_FILE")
+    if [ -f "$PROFILES_DIR/${CURRENT_PROFILE}.env" ]; then
+        # Charger uniquement les credentials REGISTRY, pas les infos projet
+        # GITHUB_TOKEN vient de .devops.yml (spécifique au projet Git)
+        local_type=$(grep "^REGISTRY_TYPE=" "$PROFILES_DIR/${CURRENT_PROFILE}.env" 2>/dev/null | cut -d'=' -f2)
+        local_token=$(grep "^REGISTRY_TOKEN=" "$PROFILES_DIR/${CURRENT_PROFILE}.env" 2>/dev/null | cut -d'=' -f2)
+        local_password=$(grep "^REGISTRY_PASSWORD=" "$PROFILES_DIR/${CURRENT_PROFILE}.env" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$local_type" ] && REGISTRY_TYPE="$local_type"
+        [ -n "$local_token" ] && REGISTRY_TOKEN="$local_token"
+        [ -n "$local_password" ] && REGISTRY_PASSWORD="$local_password"
+        # Note: GITHUB_TOKEN n'est PAS chargé depuis le profil
+        log_info "Profil registry chargé: $CURRENT_PROFILE" >&2
+    fi
+fi
+
+# Variables pour docker-compose registry (définies par défaut pour éviter les warnings)
+export IMAGE_TAG=${IMAGE_TAG:-""}
+export IMAGE_FULL=${IMAGE_FULL:-""}
+export ENVIRONMENT=${ENVIRONMENT:-""}
+
+# ============================================================================
+# FONCTIONS UTILITAIRES
+# ============================================================================
+
+# Charger les variables d'environnement
+load_env() {
+    local env=$1
+
+    # Chercher le fichier .env dans deployment/ ou à la racine
+    local env_file
+    if [ -f "deployment/.env.$env" ]; then
+        env_file="deployment/.env.$env"
+    elif [ -f ".env.$env" ]; then
+        env_file=".env.$env"
+    else
+        log_error "Fichier .env.$env introuvable (cherché dans deployment/ et racine)"
+        exit 1
+    fi
+
+    log_info "Chargement de $env_file"
+
+    # Charger les variables (ignorer les commentaires et lignes vides)
+    while IFS='=' read -r key value; do
+        # Ignorer commentaires et lignes vides
+        [[ $key =~ ^#.*$ ]] && continue
+        [[ -z "$key" ]] && continue
+
+        # Supprimer les espaces et quotes
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+
+        # Exporter la variable
+        export "$key=$value"
+    done < "$env_file"
+}
+
+# ============================================================================
+# FONCTIONS GESTION PROFILS REGISTRY
+# ============================================================================
+
+# Lister les profils disponibles
+registry_list_profiles() {
+    log_header "PROFILS REGISTRY DISPONIBLES"
+
+    if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A $PROFILES_DIR/*.env 2>/dev/null)" ]; then
+        log_warn "Aucun profil registry trouvé"
+        log_info "Créez un profil avec: ./scripts/registry.sh profile create <nom>"
+        return 0
+    fi
+
+    echo -e "${CYAN}Projet actuel:${NC} ${WHITE}${REGISTRY_USERNAME:-?}/${IMAGE_NAME:-?}${NC} (depuis .devops.yml)"
+    echo ""
+
+    local current_marker=""
+    local i=1
+    for pfile in "$PROFILES_DIR"/*.env; do
+        local pname=$(basename "$pfile" .env)
+        if [ "$pname" == "$CURRENT_PROFILE" ]; then
+            current_marker=" ${GREEN}(actif)${NC}"
+        else
+            current_marker=""
+        fi
+
+        # Lire le type depuis le profil sans utiliser source
+        local ptype=$(grep "^REGISTRY_TYPE=" "$pfile" 2>/dev/null | cut -d'=' -f2)
+
+        echo -e "  ${CYAN}$i)${NC} ${WHITE}$pname${NC}$current_marker"
+        echo -e "     Type: ${ptype:-dockerhub}"
+        echo ""
+        ((i++))
+    done
+}
+
+# Charger un profil registry (credentials uniquement)
+registry_load_profile() {
+    local profile_name=$1
+
+    if [ -z "$profile_name" ]; then
+        # Mode interactif - afficher une liste numérotée
+        log_header "CHARGER UN PROFIL REGISTRY"
+
+        if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A $PROFILES_DIR/*.env 2>/dev/null)" ]; then
+            log_warn "Aucun profil registry trouvé"
+            log_info "Créez un profil avec: ./deployment/scripts/registry.sh profile create <nom>"
+            return 1
+        fi
+
+        echo -e "${CYAN}Projet actuel:${NC} ${WHITE}${REGISTRY_USERNAME:-?}/${IMAGE_NAME:-?}${NC} (depuis .devops.yml)"
+        echo ""
+
+        local profiles=()
+        local i=1
+        for pfile in "$PROFILES_DIR"/*.env; do
+            local pname=$(basename "$pfile" .env)
+            profiles+=("$pname")
+
+            # Lire le type depuis le profil sans utiliser source
+            local ptype=$(grep "^REGISTRY_TYPE=" "$pfile" 2>/dev/null | cut -d'=' -f2)
+
+            # Marquer le profil actif
+            local marker=""
+            if [ "$pname" == "$CURRENT_PROFILE" ]; then
+                marker=" ${GREEN}(actif)${NC}"
+            fi
+
+            echo -e "  ${CYAN}$i)${NC} ${WHITE}$pname${NC}$marker"
+            echo -e "     Type: ${ptype:-dockerhub}"
+            echo ""
+            ((i++))
+        done
+
+        echo ""
+        read -p "Choisissez un profil (1-${#profiles[@]}) ou tapez le nom: " choice
+
+        # Vérifier si c'est un numéro
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            if [ "$choice" -ge 1 ] && [ "$choice" -le "${#profiles[@]}" ]; then
+                profile_name="${profiles[$((choice-1))]}"
+            else
+                log_error "Numéro invalide"
+                return 1
+            fi
+        else
+            profile_name="$choice"
+        fi
+    fi
+
+    local profile_file="$PROFILES_DIR/${profile_name}.env"
+
+    if [ ! -f "$profile_file" ]; then
+        log_error "Profil '$profile_name' introuvable"
+        return 1
+    fi
+
+    # Charger UNIQUEMENT les credentials REGISTRY depuis le profil
+    # GITHUB_TOKEN vient de .devops.yml (spécifique au projet Git)
+    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+
+    [ -n "$temp_type" ] && REGISTRY_TYPE="$temp_type"
+    [ -n "$temp_token" ] && REGISTRY_TOKEN="$temp_token"
+    [ -n "$temp_password" ] && REGISTRY_PASSWORD="$temp_password"
+    # Note: GITHUB_TOKEN n'est PAS chargé depuis le profil (vient de .devops.yml)
+
+    CURRENT_PROFILE="$profile_name"
+    echo "$profile_name" > "$LAST_PROFILE_FILE"
+
+    log_success "Profil '$profile_name' chargé"
+    log_info "Registry: ${REGISTRY_URL}"
+    log_info "Image: ${REGISTRY_USERNAME}/${IMAGE_NAME}"
+}
+
+# Construire le nom complet de l'image depuis le registry
+build_registry_image_name() {
+    local env=$1
+    local tag=${2:-${env}-latest}
+
+    if [ -z "$REGISTRY_USERNAME" ] || [ -z "$IMAGE_NAME" ]; then
+        log_error "Profil registry non chargé. Utilisez: charger-profil"
+        return 1
+    fi
+
+    if [ "$REGISTRY_URL" == "docker.io" ]; then
+        echo "${REGISTRY_USERNAME}/${IMAGE_NAME}:${tag}"
+    else
+        echo "${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${tag}"
+    fi
+}
+
+# Lister les tags disponibles dans le registry
+registry_list_tags() {
+    local env=$1
+
+    if [ -z "$REGISTRY_USERNAME" ] || [ -z "$IMAGE_NAME" ]; then
+        log_error "Profil registry non chargé"
+        return 1
+    fi
+
+    log_header "TAGS DISPONIBLES - $env"
+
+    case "${REGISTRY_TYPE:-dockerhub}" in
+        dockerhub)
+            log_info "Interrogation de Docker Hub..."
+            local api_url="https://hub.docker.com/v2/repositories/${REGISTRY_USERNAME}/${IMAGE_NAME}/tags?page_size=100"
+
+            # Récupérer les tags et filtrer par environnement
+            local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-" | sort -r)
+
+            if [ -z "$tags" ]; then
+                log_warn "Aucun tag trouvé pour l'environnement $env"
+                return 1
+            fi
+
+            echo -e "${CYAN}Tags disponibles pour ${WHITE}$env${NC}:\n"
+
+            local count=1
+            echo "$tags" | while IFS= read -r tag; do
+                if [[ "$tag" == *"-latest" ]]; then
+                    echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC}"
+                else
+                    echo -e "  ${CYAN}$count)${NC} $tag"
+                fi
+                ((count++))
+            done
+            ;;
+
+        *)
+            log_warn "Listing des tags non implémenté pour: ${REGISTRY_TYPE}"
+            ;;
+    esac
+}
+
+# Vérifier les prérequis
+check_requirements() {
+    local missing=0
+
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker n'est pas installé"
+        missing=1
+    fi
+
+    if ! command -v docker compose &> /dev/null; then
+        log_error "Docker Compose n'est pas installé"
+        missing=1
+    fi
+
+    if [ $missing -eq 1 ]; then
+        exit 1
+    fi
+}
+
+# Valider l'environnement
+validate_env() {
+    local env=$1
+    if [ "$env" != "dev" ] && [ "$env" != "staging" ] && [ "$env" != "prod" ] && [ "$env" != "all" ]; then
+        log_error "Environnement invalide: $env (doit être 'dev', 'staging', 'prod' ou 'all')"
+        exit 1
+    fi
+}
+
+# Obtenir le nom du conteneur
+get_container_name() {
+    local env=$1
+    local service=$2
+    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    echo "${prefix}-${service}-${env}"
+}
+
+# Vérifier si un conteneur est en cours d'exécution
+is_container_running() {
+    local container=$1
+    docker ps --format '{{.Names}}' | grep -q "^${container}$"
+}
+
+# Confirmation pour les actions critiques
+confirm_action() {
+    local message=$1
+    local env=$2
+
+    if [ "$env" == "prod" ]; then
+        log_warn "$message"
+        read -p "Êtes-vous ABSOLUMENT sûr ? Tapez 'yes' pour confirmer: " confirm
+        if [ "$confirm" != "yes" ]; then
+            log_info "Action annulée"
+            exit 0
+        fi
+    else
+        read -p "$message (y/n): " confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            log_info "Action annulée"
+            exit 0
+        fi
+    fi
+}
+
+# Nettoyer les réseaux Docker avec des labels incorrects
+clean_docker_networks() {
+    local env=$1
+    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    local network_name="${prefix}-${env}-network"
+
+    # Vérifier si le réseau existe
+    if docker network ls --format '{{.Name}}' | grep -q "^${network_name}$"; then
+        log_info "Vérification du réseau ${network_name}..."
+
+        # Vérifier si le réseau a un label incorrect
+        local network_label=$(docker network inspect "$network_name" \
+            --format '{{index .Labels "com.docker.compose.network"}}' 2>/dev/null || echo "")
+
+        # Le label attendu devrait être soit vide, soit correspondre au nom du réseau
+        local expected_label="${network_name}"
+
+        if [ -n "$network_label" ] && [ "$network_label" != "$expected_label" ]; then
+            log_warn "Réseau ${network_name} trouvé avec un label incorrect: ${network_label}"
+            log_warn "Label attendu: ${expected_label}"
+
+            # Vérifier s'il y a des conteneurs connectés
+            local connected=$(docker network inspect "$network_name" \
+                --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || echo "")
+
+            if [ -n "$connected" ]; then
+                log_warn "Conteneurs connectés: ${connected}"
+                log_info "Déconnexion des conteneurs..."
+
+                # Arrêter les conteneurs connectés
+                for container in $connected; do
+                    docker stop "$container" 2>/dev/null || true
+                done
+            fi
+
+            log_info "Suppression du réseau ${network_name}..."
+            docker network rm "$network_name" 2>/dev/null || true
+            log_success "Réseau nettoyé, il sera recréé avec les bons paramètres"
+        fi
+    fi
+}
+
+# ============================================================================
+# COMMANDES PRINCIPALES
+# ============================================================================
+
+# Déployer un environnement
+cmd_deploy() {
+    local env=$1
+    local no_cache=${2:-false}
+    local use_git=${3:-false}
+    local from_registry=${4:-false}
+    local registry_version=${5:-latest}
+    local custom_branch=${6:-}
+    local use_local=${7:-false}
+
+    validate_env "$env"
+    load_env "$env"
+
+    # Override GIT_BRANCH si une branche custom est spécifiée
+    if [ -n "$custom_branch" ]; then
+        log_info "Utilisation de la branche personnalisée: $custom_branch"
+        GIT_BRANCH="$custom_branch"
+    fi
+
+    log_header "DÉPLOIEMENT - Environnement: $env"
+
+    # Confirmation pour la production
+    if [ "$env" == "prod" ]; then
+        confirm_action "Vous êtes sur le point de déployer en PRODUCTION" "$env"
+    fi
+
+    # Méthode de déploiement
+    if [ "$use_local" == "true" ]; then
+        log_info "Mode: Build depuis fichiers locaux (répertoire actuel)"
+        log_warn "📁 Déploiement depuis les fichiers locaux actuels"
+        log_info "Répertoire: $(pwd)"
+        log_info "Branche Git actuelle: $(git branch --show-current 2>/dev/null || echo 'inconnue')"
+
+        # Build local directement (sans clone)
+        local build_args="build"
+        if [ "$no_cache" == "true" ]; then
+            build_args="$build_args --no-cache"
+        fi
+
+        log_info "Construction de l'image depuis les fichiers locaux..."
+        docker compose -f "deployment/docker-compose.$env.yml" $build_args
+
+    elif [ "$from_registry" == "true" ]; then
+        log_info "Mode: Pull depuis le registry Docker"
+        log_info "Version: $registry_version"
+
+        # Appeler le script registry pour pull
+        if [ -f "$SCRIPT_DIR/registry.sh" ]; then
+            bash "$SCRIPT_DIR/registry.sh" pull "$env" "$registry_version"
+        else
+            log_error "Script registry.sh introuvable"
+            exit 1
+        fi
+    else
+        # Build local
+        if [ "$use_git" == "true" ]; then
+            log_info "Mode: Build avec clone Git (branche: $GIT_BRANCH)"
+
+            # Vérifier que le Dockerfile .git existe
+            local dockerfile="deployment/docker/Dockerfile.${env}.git"
+            if [ ! -f "$dockerfile" ]; then
+                log_error "Dockerfile $dockerfile introuvable"
+                exit 1
+            fi
+
+            # Utiliser docker build directement (pas docker compose)
+            # car on veut utiliser un Dockerfile différent
+            local build_args_list=()
+            if [ "$no_cache" == "true" ]; then
+                build_args_list+=("--no-cache")
+            fi
+
+            # Ajouter les build args pour Git
+            build_args_list+=("--build-arg" "GIT_BRANCH=$GIT_BRANCH")
+            build_args_list+=("--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')")
+            build_args_list+=("--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')")
+
+            if [ -n "$GITHUB_TOKEN" ]; then
+                build_args_list+=("--build-arg" "GITHUB_TOKEN=$GITHUB_TOKEN")
+            fi
+
+            # Nom de l'image selon l'environnement
+            local image_name="${PROJECT_NAME}-${env}:latest"
+
+            log_info "Construction de l'image avec clone Git..."
+            docker build \
+                -f "$dockerfile" \
+                -t "$image_name" \
+                "${build_args_list[@]}" \
+                .
+
+        else
+            log_info "Mode: Build local avec clone temporaire"
+            log_info "Branche à déployer: $GIT_BRANCH"
+
+            # Créer un dossier temporaire pour le clone
+            local temp_dir="/tmp/${PROJECT_NAME}-deploy-$(date +%s)"
+            log_info "Clonage temporaire dans: $temp_dir"
+
+            # Obtenir l'URL du repo et la convertir en HTTPS si SSH
+            local git_remote=$(git config --get remote.origin.url)
+
+            # Convertir SSH en HTTPS
+            if [[ "$git_remote" =~ ^git@github\.com.*:(.*)\.git$ ]]; then
+                local repo_path="${BASH_REMATCH[1]}"
+                git_remote="https://github.com/${repo_path}.git"
+                log_info "URL convertie en HTTPS: $git_remote"
+
+                # Utiliser le token si disponible
+                if [ -n "$GITHUB_TOKEN" ]; then
+                    git_remote="https://oauth2:${GITHUB_TOKEN}@github.com/${repo_path}.git"
+                    log_info "Utilisation du token GitHub pour l'authentification"
+                fi
+            elif [[ "$git_remote" =~ ^git@github\.com-.*:(.*)\.git$ ]]; then
+                # Cas spécial pour git@github.com-jeff:
+                local repo_path=$(echo "$git_remote" | sed -E 's/^git@github\.com-[^:]+:(.*)\.git$/\1/')
+                git_remote="https://github.com/${repo_path}.git"
+                log_info "URL convertie en HTTPS: $git_remote"
+
+                # Utiliser le token si disponible
+                if [ -n "$GITHUB_TOKEN" ]; then
+                    git_remote="https://oauth2:${GITHUB_TOKEN}@github.com/${repo_path}.git"
+                    log_info "Utilisation du token GitHub pour l'authentification"
+                fi
+            fi
+
+            # Clone de la branche spécifique
+            log_info "Clonage de $git_remote..."
+            if git clone --branch "$GIT_BRANCH" --depth 1 "$git_remote" "$temp_dir"; then
+                log_success "Branche $GIT_BRANCH clonée avec succès"
+            else
+                log_error "Échec du clonage de la branche $GIT_BRANCH"
+                log_error "Si le repo est privé, ajoutez GITHUB_TOKEN dans .env.$env"
+                exit 1
+            fi
+
+            # Copier le dossier deployment du projet actuel vers le clone temporaire
+            log_info "Copie de la configuration de déploiement..."
+            rm -rf "$temp_dir/deployment"
+            cp -r "deployment" "$temp_dir/deployment"
+
+            # Build des images depuis le clone temporaire
+            local build_args="build"
+            if [ "$no_cache" == "true" ]; then
+                build_args="$build_args --no-cache"
+            fi
+
+            log_info "Construction de l'image depuis le clone temporaire..."
+            (cd "$temp_dir" && docker compose -f "deployment/docker-compose.$env.yml" $build_args)
+
+            # Nettoyer le clone temporaire
+            log_info "Nettoyage du clone temporaire..."
+            rm -rf "$temp_dir"
+            log_success "Clone temporaire supprimé"
+        fi
+    fi
+
+    # Arrêt des anciens conteneurs
+    log_info "Arrêt des anciens conteneurs..."
+
+    # Essayer d'arrêter les conteneurs existants (même d'autres projets)
+    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    local containers=("${prefix}-api-$env" "${prefix}-redis-$env")
+    for container in "${containers[@]}"; do
+        if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+            log_warn "Arrêt et suppression du conteneur existant: $container"
+            docker stop "$container" 2>/dev/null || true
+            docker rm "$container" 2>/dev/null || true
+        fi
+    done
+
+    # Utiliser docker compose down pour nettoyer proprement
+    docker compose -f "deployment/docker-compose.$env.yml" down 2>/dev/null || true
+
+    # Nettoyer les réseaux avec des labels incorrects
+    clean_docker_networks "$env"
+
+    # Démarrage
+    log_info "Démarrage des conteneurs..."
+    docker compose -f "deployment/docker-compose.$env.yml" up -d
+
+    # Attendre le démarrage
+    log_info "Attente du démarrage des services..."
+    sleep 5
+
+    # Health check
+    cmd_health "$env"
+
+    # Afficher les logs récents
+    log_info "Derniers logs:"
+    print_separator
+    docker compose -f "deployment/docker-compose.$env.yml" logs --tail=20
+    print_separator
+
+    log_success "Déploiement terminé avec succès!"
+}
+
+# Démarrer les conteneurs
+cmd_start() {
+    local env=$1
+    validate_env "$env"
+
+    log_header "DÉMARRAGE - Environnement: $env"
+    docker compose -f "deployment/docker-compose.$env.yml" up -d
+    log_success "Conteneurs démarrés"
+    cmd_status "$env"
+}
+
+# Arrêter les conteneurs
+cmd_stop() {
+    local env=$1
+    validate_env "$env"
+
+    if [ "$env" == "prod" ]; then
+        confirm_action "Arrêter l'environnement de PRODUCTION ?" "$env"
+    fi
+
+    log_header "ARRÊT - Environnement: $env"
+    docker compose -f "deployment/docker-compose.$env.yml" stop
+    log_success "Conteneurs arrêtés"
+}
+
+# Redémarrer les conteneurs
+cmd_restart() {
+    local env=$1
+    local service=$2
+    validate_env "$env"
+
+    log_header "REDÉMARRAGE - Environnement: $env"
+
+    if [ -n "$service" ]; then
+        log_info "Redémarrage du service: $service"
+        docker compose -f "deployment/docker-compose.$env.yml" restart "$service"
+    else
+        docker compose -f "deployment/docker-compose.$env.yml" restart
+    fi
+
+    log_success "Redémarrage terminé"
+    cmd_status "$env"
+}
+
+# Afficher les logs
+cmd_logs() {
+    local env=$1
+    local service=$2
+    local lines=${3:-50}
+    local follow=${4:-false}
+
+    validate_env "$env"
+
+    log_header "LOGS - Environnement: $env"
+
+    local log_cmd="docker compose -f docker-compose.$env.yml logs --tail=$lines"
+
+    if [ "$follow" == "true" ]; then
+        log_cmd="$log_cmd -f"
+    fi
+
+    if [ -n "$service" ]; then
+        log_cmd="$log_cmd $service"
+    fi
+
+    eval "$log_cmd"
+}
+
+# Afficher le statut
+cmd_status() {
+    local env=$1
+
+    if [ "$env" == "all" ]; then
+        log_header "STATUT - Tous les environnements"
+        echo ""
+        echo -e "${WHITE}=== DEV ===${NC}"
+        docker compose -f deployment/docker-compose.dev.yml ps
+        echo ""
+        echo -e "${WHITE}=== PROD ===${NC}"
+        docker compose -f deployment/docker-compose.prod.yml ps
+        echo ""
+        echo -e "${WHITE}=== NGINX ===${NC}"
+        docker ps --filter "name=${PROJECT_NAME}-nginx-proxy" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+    else
+        validate_env "$env"
+        log_header "STATUT - Environnement: $env"
+        docker compose -f "deployment/docker-compose.$env.yml" ps
+    fi
+
+    echo ""
+    log_info "Utilisation des ressources:"
+    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}" \
+        $(docker ps --filter "name=${prefix}" --format "{{.Names}}")
+}
+
+# Health check
+cmd_health() {
+    local env=$1
+    validate_env "$env"
+
+    load_env "$env"
+    local port=$([ "$env" == "prod" ] && echo "8000" || echo "8001")
+
+    log_info "Health check de l'API (port $port)..."
+
+    for i in {1..10}; do
+        if curl -sf "http://localhost:$port/health" > /dev/null; then
+            log_success "API opérationnelle sur le port $port"
+            return 0
+        else
+            if [ $i -eq 10 ]; then
+                log_error "L'API ne répond pas après 10 tentatives"
+                return 1
+            fi
+            log_warn "Tentative $i/10... (attente 3s)"
+            sleep 3
+        fi
+    done
+}
+
+# Accéder au shell d'un conteneur
+cmd_shell() {
+    local env=$1
+    local service=${2:-"api"}
+    validate_env "$env"
+
+    local container=$(get_container_name "$env" "$service")
+
+    if ! is_container_running "$container"; then
+        log_error "Le conteneur $container n'est pas en cours d'exécution"
+        exit 1
+    fi
+
+    log_info "Connexion au conteneur: $container"
+    docker exec -it "$container" /bin/bash || docker exec -it "$container" /bin/sh
+}
+
+# Reconstruire les images
+cmd_rebuild() {
+    local env=$1
+    local no_cache=${2:-true}
+    validate_env "$env"
+
+    if [ "$env" == "prod" ]; then
+        confirm_action "Reconstruire les images de PRODUCTION ?" "$env"
+    fi
+
+    log_header "RECONSTRUCTION - Environnement: $env"
+
+    local build_args=""
+    if [ "$no_cache" == "true" ]; then
+        build_args="--no-cache"
+    fi
+
+    docker compose -f "deployment/docker-compose.$env.yml" build $build_args
+    log_success "Images reconstruites"
+}
+
+# Nettoyer les ressources Docker
+cmd_clean() {
+    local env=$1
+    local deep=${2:-false}
+
+    log_header "NETTOYAGE"
+
+    if [ "$env" != "all" ]; then
+        validate_env "$env"
+        confirm_action "Nettoyer l'environnement $env ?" "$env"
+
+        log_info "Arrêt et suppression des conteneurs $env..."
+        docker compose -f "deployment/docker-compose.$env.yml" down -v
+    else
+        confirm_action "Nettoyer TOUS les environnements ?" "prod"
+
+        log_info "Arrêt et suppression de tous les conteneurs..."
+        docker compose -f deployment/docker-compose.dev.yml down -v 2>/dev/null || true
+        docker compose -f deployment/docker-compose.prod.yml down -v 2>/dev/null || true
+        docker compose -f deployment/docker-compose.nginx.yml down -v 2>/dev/null || true
+    fi
+
+    log_info "Suppression des images inutilisées..."
+    docker image prune -f
+
+    if [ "$deep" == "true" ]; then
+        confirm_action "Effectuer un nettoyage complet (images, volumes, cache) ?" "prod"
+        log_warn "Nettoyage complet du système Docker..."
+        docker system prune -a -f --volumes
+    fi
+
+    log_success "Nettoyage terminé"
+}
+
+# Backup Redis
+cmd_backup() {
+    local env=$1
+    validate_env "$env"
+
+    local container=$(get_container_name "$env" "redis")
+    local backup_dir="./backups"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/redis-${env}-${timestamp}.rdb"
+
+    mkdir -p "$backup_dir"
+
+    log_header "BACKUP REDIS - Environnement: $env"
+
+    if ! is_container_running "$container"; then
+        log_error "Le conteneur Redis $container n'est pas en cours d'exécution"
+        exit 1
+    fi
+
+    log_info "Création d'un snapshot Redis..."
+    docker exec "$container" redis-cli SAVE
+
+    log_info "Copie du fichier de sauvegarde..."
+    docker cp "$container:/data/dump.rdb" "$backup_file"
+
+    log_success "Backup créé: $backup_file"
+    ls -lh "$backup_file"
+}
+
+# Restaurer Redis
+cmd_restore() {
+    local env=$1
+    local backup_file=$2
+
+    validate_env "$env"
+
+    if [ ! -f "$backup_file" ]; then
+        log_error "Fichier de backup introuvable: $backup_file"
+        exit 1
+    fi
+
+    confirm_action "Restaurer Redis depuis $backup_file ?" "$env"
+
+    local container=$(get_container_name "$env" "redis")
+
+    log_header "RESTAURATION REDIS - Environnement: $env"
+
+    # Arrêter Redis
+    log_info "Arrêt de Redis..."
+    docker compose -f "deployment/docker-compose.$env.yml" stop redis-$env
+
+    # Copier le backup
+    log_info "Copie du fichier de backup..."
+    docker cp "$backup_file" "$container:/data/dump.rdb"
+
+    # Redémarrer Redis
+    log_info "Redémarrage de Redis..."
+    docker compose -f "deployment/docker-compose.$env.yml" start redis-$env
+
+    log_success "Restauration terminée"
+}
+
+# Voir les statistiques en temps réel
+cmd_stats() {
+    log_header "STATISTIQUES DOCKER"
+    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    docker stats $(docker ps --filter "name=${prefix}" --format "{{.Names}}")
+}
+
+# Exécuter une commande dans un conteneur
+cmd_exec() {
+    local env=$1
+    local service=${2:-"api"}
+    shift 2
+    local command="$@"
+
+    validate_env "$env"
+
+    local container=$(get_container_name "$env" "$service")
+
+    if ! is_container_running "$container"; then
+        log_error "Le conteneur $container n'est pas en cours d'exécution"
+        exit 1
+    fi
+
+    log_info "Exécution de la commande dans $container: $command"
+    docker exec -it "$container" $command
+}
+
+# Gestion Nginx
+cmd_nginx() {
+    local action=$1
+
+    case "$action" in
+        start)
+            log_info "Démarrage de Nginx..."
+            docker compose -f deployment/docker-compose.nginx.yml up -d
+            log_success "Nginx démarré"
+            ;;
+        stop)
+            log_info "Arrêt de Nginx..."
+            docker compose -f deployment/docker-compose.nginx.yml down
+            log_success "Nginx arrêté"
+            ;;
+        restart)
+            log_info "Redémarrage de Nginx..."
+            docker compose -f deployment/docker-compose.nginx.yml restart
+            log_success "Nginx redémarré"
+            ;;
+        reload)
+            log_info "Rechargement de la configuration Nginx..."
+            docker exec ${PROJECT_NAME}-nginx-proxy nginx -s reload
+            log_success "Configuration rechargée"
+            ;;
+        test)
+            log_info "Test de la configuration Nginx..."
+            docker exec ${PROJECT_NAME}-nginx-proxy nginx -t
+            ;;
+        logs)
+            local lines=${2:-50}
+            docker compose -f deployment/docker-compose.nginx.yml logs --tail="$lines" -f
+            ;;
+        *)
+            log_error "Action Nginx invalide: $action"
+            echo "Actions disponibles: start, stop, restart, reload, test, logs"
+            exit 1
+            ;;
+    esac
+}
+
+# ============================================================================
+# MENU INTERACTIF
+# ============================================================================
+
+show_interactive_menu() {
+    clear
+    local title="${PROJECT_NAME:-DevOps} - Docker Management System"
+    local padding=$(( (55 - ${#title}) / 2 ))
+    local left_pad=$(printf '%*s' $padding '')
+    local right_pad=$(printf '%*s' $(( 55 - ${#title} - padding )) '')
+
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}  ${left_pad}${WHITE}${title}${NC}${right_pad}  ${CYAN}║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    echo -e "${WHITE}Gestion des environnements:${NC}"
+    echo "  1) Déployer DEV (fichiers locaux)"
+    echo "  2) Déployer DEV (clone temporaire)"
+    echo "  3) Déployer DEV (clone Git dans Docker)"
+    echo "  4) Déployer PROD (clone temporaire)"
+    echo "  5) Déployer PROD (clone Git dans Docker)"
+    echo "  6) Déployer depuis Registry"
+    echo "  7) Statut complet"
+    echo ""
+    echo -e "${WHITE}Actions rapides:${NC}"
+    echo "  8) Démarrer un environnement"
+    echo "  9) Arrêter un environnement"
+    echo " 10) Redémarrer un environnement"
+    echo " 11) Voir les logs"
+    echo " 12) Accéder au shell"
+    echo ""
+    echo -e "${WHITE}Maintenance:${NC}"
+    echo " 13) Backup Redis"
+    echo " 14) Restaurer Redis"
+    echo " 15) Reconstruire les images"
+    echo " 16) Nettoyer Docker"
+    echo ""
+    echo -e "${WHITE}Nginx & Registry:${NC}"
+    echo " 17) Gérer Nginx"
+    echo " 18) Créer une release (Registry)"
+    echo ""
+    echo -e "${WHITE}Profils Registry:${NC}"
+    echo " 19) Lister les profils registry"
+    echo " 20) Charger un profil registry"
+    echo " 21) Lister les tags disponibles"
+    echo ""
+    echo "  0) Quitter"
+    echo ""
+    read -p "Choisissez une option: " choice
+
+    case $choice in
+        1)
+            # Déployer DEV (fichiers locaux)
+            log_info "Déploiement DEV depuis les fichiers locaux..."
+            log_warn "⚠️  Les fichiers du répertoire actuel seront utilisés"
+            cmd_deploy "dev" false false false "latest" "" true
+            ;;
+        2)
+            # Déployer DEV (clone temporaire)
+            read -p "Branche à déployer (laisser vide pour utiliser celle du .env): " branch
+            cmd_deploy "dev" false false false "latest" "$branch" false
+            ;;
+        3)
+            # Déployer DEV (clone Git dans Docker)
+            read -p "Branche à déployer (laisser vide pour utiliser celle du .env): " branch
+            cmd_deploy "dev" false true false "latest" "$branch" false
+            ;;
+        4)
+            # Déployer PROD (clone temporaire)
+            read -p "Branche à déployer (laisser vide pour utiliser celle du .env): " branch
+            cmd_deploy "prod" false false false "latest" "$branch" false
+            ;;
+        5)
+            # Déployer PROD (clone Git dans Docker)
+            read -p "Branche à déployer (laisser vide pour utiliser celle du .env): " branch
+            cmd_deploy "prod" false true false "latest" "$branch" false
+            ;;
+        6)
+            # Déployer depuis Registry
+            log_header "DÉPLOIEMENT DEPUIS REGISTRY"
+
+            # Vérifier qu'un profil est chargé
+            if [ -z "$CURRENT_PROFILE" ]; then
+                log_warn "Aucun profil registry chargé"
+                echo ""
+                registry_list_profiles
+                echo ""
+                read -p "Charger un profil? (y/n): " load_profile
+                if [ "$load_profile" == "y" ]; then
+                    registry_load_profile
+                else
+                    log_error "Un profil registry est requis"
+                    read -p "Appuyez sur Entrée pour continuer..."
+                    continue
+                fi
+            fi
+
+            echo ""
+            log_info "Profil actif: ${WHITE}${CURRENT_PROFILE}${NC}"
+            log_info "Registry: ${REGISTRY_URL}"
+            log_info "Image: ${REGISTRY_USERNAME}/${IMAGE_NAME}"
+            echo ""
+
+            # Sélection de l'environnement
+            echo -e "${CYAN}Environnements disponibles:${NC}"
+            echo "  1) dev     - Environnement de développement"
+            echo "  2) staging - Environnement de pré-production"
+            echo "  3) prod    - Environnement de production"
+            echo ""
+            read -p "Choisissez l'environnement (1=dev, 2=staging, 3=prod): " env_choice
+
+            case "$env_choice" in
+                1) env="dev" ;;
+                2) env="staging" ;;
+                3) env="prod" ;;
+                *)
+                    log_error "Choix invalide"
+                    read -p "Appuyez sur Entrée pour continuer..."
+                    continue
+                    ;;
+            esac
+
+            echo ""
+
+            # Récupérer les tags disponibles
+            local api_url="https://hub.docker.com/v2/repositories/${REGISTRY_USERNAME}/${IMAGE_NAME}/tags?page_size=100"
+            local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-" | sort -rV)
+
+            if [ -z "$tags" ]; then
+                log_warn "Aucun tag trouvé, utilisation de ${env}-latest"
+                version="${env}-latest"
+            else
+                echo -e "${CYAN}Tags disponibles pour ${WHITE}$env${NC}:\n"
+
+                # Afficher les tags avec numérotation
+                local tags_array=()
+                local count=1
+                while IFS= read -r tag; do
+                    tags_array+=("$tag")
+                    if [[ "$tag" == *"-latest" ]]; then
+                        echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC}"
+                    elif [[ "$tag" =~ -v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                        echo -e "  ${GREEN}$count)${NC} ${CYAN}$tag${NC}"
+                    else
+                        echo -e "  ${GREEN}$count)${NC} $tag"
+                    fi
+                    ((count++))
+                done <<< "$tags"
+
+                echo ""
+                read -p "Choisissez un tag (1-${#tags_array[@]}) ou Entrée pour ${env}-latest: " tag_choice
+
+                # Si vide, utiliser latest
+                if [ -z "$tag_choice" ]; then
+                    version="${env}-latest"
+                # Si c'est un numéro
+                elif [[ "$tag_choice" =~ ^[0-9]+$ ]]; then
+                    if [ "$tag_choice" -ge 1 ] && [ "$tag_choice" -le "${#tags_array[@]}" ]; then
+                        version="${tags_array[$((tag_choice-1))]}"
+                    else
+                        log_error "Numéro invalide"
+                        read -p "Appuyez sur Entrée pour continuer..."
+                        continue
+                    fi
+                # Sinon c'est un nom de tag
+                else
+                    version="$tag_choice"
+                fi
+            fi
+
+            # Construire le nom complet de l'image
+            image_full=$(build_registry_image_name "$env" "$version")
+
+            if [ -z "$image_full" ]; then
+                log_error "Impossible de construire le nom de l'image"
+                read -p "Appuyez sur Entrée pour continuer..."
+                continue
+            fi
+
+            echo ""
+            log_info "Image à déployer: ${WHITE}${image_full}${NC}"
+            echo ""
+            read -p "Confirmer le déploiement? (yes/n): " confirm
+
+            if [ "$confirm" != "yes" ]; then
+                log_info "Déploiement annulé"
+                read -p "Appuyez sur Entrée pour continuer..."
+                continue
+            fi
+
+            # Déployer avec docker compose registry
+            export ENVIRONMENT=$env
+            export IMAGE_TAG=$version
+            export IMAGE_FULL=$image_full
+            export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-akiliya-vision-core-backend}-${env}"
+
+            cd deployment
+
+            log_info "Arrêt des conteneurs existants..."
+            docker compose -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml down || true
+
+            log_info "Téléchargement de l'image..."
+            docker pull "$image_full"
+
+            log_info "Démarrage des services..."
+            docker compose -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml up -d
+
+            cd ..
+
+            sleep 2
+            log_success "Déploiement terminé!"
+            echo ""
+            docker compose -f deployment/docker-compose.registry.yml -f deployment/docker-compose.${env}-registry.yml ps
+
+            echo ""
+            read -p "Appuyez sur Entrée pour continuer..."
+            ;;
+        7)
+            cmd_status "all"
+            ;;
+        8)
+            read -p "Environnement (dev/prod): " env
+            cmd_start "$env"
+            ;;
+        9)
+            read -p "Environnement (dev/prod): " env
+            cmd_stop "$env"
+            ;;
+        10)
+            read -p "Environnement (dev/prod): " env
+            cmd_restart "$env"
+            ;;
+        11)
+            read -p "Environnement (dev/prod): " env
+            read -p "Suivre les logs en temps réel ? (y/n): " follow
+            if [ "$follow" == "y" ]; then
+                cmd_logs "$env" "" 50 "true"
+            else
+                cmd_logs "$env" "" 100 "false"
+            fi
+            ;;
+        12)
+            read -p "Environnement (dev/prod): " env
+            cmd_shell "$env"
+            ;;
+        13)
+            read -p "Environnement (dev/prod): " env
+            cmd_backup "$env"
+            ;;
+        14)
+            read -p "Environnement (dev/prod): " env
+            read -p "Chemin du fichier de backup: " backup_file
+            cmd_restore "$env" "$backup_file"
+            ;;
+        15)
+            read -p "Environnement (dev/prod): " env
+            cmd_rebuild "$env"
+            ;;
+        16)
+            read -p "Environnement (dev/prod/all): " env
+            read -p "Nettoyage profond ? (y/n): " deep
+            cmd_clean "$env" $([ "$deep" == "y" ] && echo "true" || echo "false")
+            ;;
+        17)
+            read -p "Action (start/stop/restart/reload/test/logs): " action
+            cmd_nginx "$action"
+            ;;
+        18)
+            # Créer une release (Registry)
+            read -p "Environnement (dev/prod): " env
+            read -p "Version (laisser vide pour génération auto): " version
+            if [ -f "$SCRIPT_DIR/registry.sh" ]; then
+                if [ -n "$version" ]; then
+                    bash "$SCRIPT_DIR/registry.sh" release "$env" "$version"
+                else
+                    bash "$SCRIPT_DIR/registry.sh" release "$env"
+                fi
+            else
+                log_error "Script registry.sh introuvable"
+            fi
+            ;;
+        19)
+            # Lister les profils registry
+            registry_list_profiles
+            echo ""
+            read -p "Appuyez sur Entrée pour continuer..."
+            ;;
+        20)
+            # Charger un profil registry
+            registry_load_profile
+            echo ""
+            read -p "Appuyez sur Entrée pour continuer..."
+            ;;
+        21)
+            # Lister les tags disponibles
+            if [ -z "$CURRENT_PROFILE" ]; then
+                log_error "Aucun profil registry chargé"
+                echo ""
+                read -p "Charger un profil? (y/n): " load_profile
+                if [ "$load_profile" == "y" ]; then
+                    registry_load_profile
+                else
+                    echo ""
+                    read -p "Appuyez sur Entrée pour continuer..."
+                    continue
+                fi
+            fi
+
+            echo ""
+            echo -e "${CYAN}Environnements:${NC}"
+            echo "  1) dev"
+            echo "  2) prod"
+            echo ""
+            read -p "Choisissez l'environnement (1-2): " env_choice
+
+            case "$env_choice" in
+                1) env="dev" ;;
+                2) env="prod" ;;
+                *)
+                    log_error "Choix invalide"
+                    echo ""
+                    read -p "Appuyez sur Entrée pour continuer..."
+                    continue
+                    ;;
+            esac
+
+            echo ""
+            registry_list_tags "$env"
+            echo ""
+            read -p "Appuyez sur Entrée pour continuer..."
+            ;;
+        0)
+            log_info "Au revoir!"
+            exit 0
+            ;;
+        *)
+            log_error "Option invalide"
+            ;;
+    esac
+
+    echo ""
+    read -p "Appuyez sur Entrée pour continuer..."
+    show_interactive_menu
+}
+
+# ============================================================================
+# AIDE
+# ============================================================================
+
+show_help() {
+    echo -e "${WHITE}${PROJECT_NAME:-DevOps} - Docker Management CLI${NC}"
+    echo ""
+    echo -e "${CYAN}USAGE:${NC}"
+    echo "    ./deploy.sh <command> [arguments] [options]"
+    echo "    ./deploy.sh                              # Mode interactif"
+    echo ""
+    echo -e "${CYAN}COMMANDES:${NC}"
+    echo ""
+    echo -e "${WHITE}Déploiement:${NC}"
+    echo "    deploy <env>                   Déployer un environnement (dev/prod)"
+    echo "        --no-cache                 Construire sans cache"
+    echo "        --use-local                Build depuis fichiers locaux (sans clone)"
+    echo "        --use-git                  Clone depuis Git dans le build"
+    echo "        --from-registry [version]  Pull depuis le registry Docker"
+    echo "        --branch <branch>          Déployer une branche spécifique"
+    echo "        (Par défaut: clone temporaire de la branche depuis .env)"
+    echo ""
+    echo -e "${WHITE}Gestion des conteneurs:${NC}"
+    echo "    start <env>                    Démarrer les conteneurs"
+    echo "    stop <env>                     Arrêter les conteneurs"
+    echo "    restart <env> [service]        Redémarrer les conteneurs ou un service"
+    echo "    status [env]                   Afficher le statut (env: dev/prod/all)"
+    echo "    stats                          Statistiques en temps réel"
+    echo "    health <env>                   Vérifier la santé de l'API"
+    echo ""
+    echo -e "${WHITE}Logs & Debug:${NC}"
+    echo "    logs <env> [service] [lines]   Afficher les logs"
+    echo "        -f, --follow               Suivre les logs en temps réel"
+    echo "    shell <env> [service]          Accéder au shell (service: api/redis)"
+    echo "    exec <env> <service> <cmd>     Exécuter une commande"
+    echo ""
+    echo -e "${WHITE}Maintenance:${NC}"
+    echo "    rebuild <env>                  Reconstruire les images"
+    echo "        --cache                    Utiliser le cache"
+    echo "    clean <env>                    Nettoyer (env: dev/prod/all)"
+    echo "        --deep                     Nettoyage profond"
+    echo "    backup <env>                   Backup Redis"
+    echo "    restore <env> <file>           Restaurer Redis"
+    echo ""
+    echo -e "${WHITE}Nginx:${NC}"
+    echo "    nginx <action>                 Gérer Nginx"
+    echo "        Actions: start, stop, restart, reload, test, logs"
+    echo ""
+    echo -e "${CYAN}EXEMPLES:${NC}"
+    echo "    # Déploiement depuis fichiers locaux (rapide pour le dev)"
+    echo "    ./deploy.sh deploy dev --use-local"
+    echo ""
+    echo "    # Déploiement avec clone temporaire (par défaut, branche du .env)"
+    echo "    ./deploy.sh deploy dev"
+    echo "    ./deploy.sh deploy prod --no-cache"
+    echo ""
+    echo "    # Déployer une branche spécifique (clone temporaire)"
+    echo "    ./deploy.sh deploy dev --branch feature/CICBI-01-gestion-utilisateurs-api"
+    echo "    ./deploy.sh deploy prod --branch release/v1.2.0"
+    echo ""
+    echo "    # Déploiement avec clone Git dans Docker"
+    echo "    ./deploy.sh deploy dev --use-git"
+    echo "    ./deploy.sh deploy prod --use-git --branch main"
+    echo ""
+    echo "    # Déploiement depuis le registry"
+    echo "    ./deploy.sh deploy dev --from-registry"
+    echo "    ./deploy.sh deploy prod --from-registry v1.2.3"
+    echo ""
+    echo "    # Autres commandes"
+    echo "    ./deploy.sh logs dev -f"
+    echo "    ./deploy.sh shell prod api"
+    echo "    ./deploy.sh backup prod"
+    echo "    ./deploy.sh nginx reload"
+    echo "    ./deploy.sh status all"
+    echo ""
+    echo -e "${CYAN}WORKFLOWS RECOMMANDÉS:${NC}"
+    echo ""
+    echo -e "    ${WHITE}1. Développement rapide (fichiers locaux - NOUVEAU!):${NC}"
+    echo "       # Tester rapidement vos modifications locales sans commit"
+    echo "       # Utilise directement les fichiers du répertoire actuel"
+    echo "       ./deploy.sh deploy dev --use-local"
+    echo ""
+    echo -e "    ${WHITE}2. Développement (clone temporaire):${NC}"
+    echo "       # Reste sur votre branche actuelle (ex: feature/CICBI-05)"
+    echo "       # Clone temporairement la branche à déployer, puis la supprime"
+    echo "       ./deploy.sh deploy dev --branch feature/CICBI-01-gestion-utilisateurs-api"
+    echo ""
+    echo -e "    ${WHITE}3. Développement (build avec Git clone dans Docker):${NC}"
+    echo "       # Clone depuis Git directement dans l'image Docker"
+    echo "       ./deploy.sh deploy dev --use-git --branch develop"
+    echo ""
+    echo -e "    ${WHITE}4. Production (avec registry et versioning):${NC}"
+    echo "       # Sur la machine de build/CI:"
+    echo "       cd deployment/scripts"
+    echo "       ./registry.sh release prod v1.2.3"
+    echo ""
+    echo "       # Sur le serveur de production:"
+    echo "       ./deploy.sh deploy prod --from-registry v1.2.3"
+    echo ""
+    echo -e "${CYAN}ENVIRONNEMENTS:${NC}"
+    echo "    dev      Environnement de développement"
+    echo "    staging  Environnement de pré-production"
+    echo "    prod     Environnement de production"
+    echo "    all      Tous les environnements"
+    echo ""
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    # Vérifier les prérequis
+    check_requirements
+
+    # Si aucun argument, mode interactif
+    if [ $# -eq 0 ]; then
+        show_interactive_menu
+        exit 0
+    fi
+
+    # Parser la commande
+    COMMAND=$1
+    shift
+
+    case "$COMMAND" in
+        deploy)
+            ENV=${1:-""}
+            if [ -z "$ENV" ]; then
+                log_error "Environnement requis"
+                echo "Usage: ./deploy.sh deploy <dev|prod> [--no-cache] [--use-local] [--use-git] [--from-registry [version]] [--branch <branch>]"
+                exit 1
+            fi
+            NO_CACHE=false
+            USE_GIT=false
+            FROM_REGISTRY=false
+            REGISTRY_VERSION="latest"
+            CUSTOM_BRANCH=""
+            USE_LOCAL=false
+            shift
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --no-cache)
+                        NO_CACHE=true
+                        ;;
+                    --use-local)
+                        USE_LOCAL=true
+                        ;;
+                    --use-git)
+                        USE_GIT=true
+                        ;;
+                    --from-registry)
+                        FROM_REGISTRY=true
+                        # Vérifier si une version est spécifiée
+                        if [ $# -gt 1 ] && [[ ! "$2" =~ ^-- ]]; then
+                            shift
+                            REGISTRY_VERSION="$1"
+                        fi
+                        ;;
+                    --branch)
+                        if [ $# -gt 1 ]; then
+                            shift
+                            CUSTOM_BRANCH="$1"
+                        else
+                            log_error "L'option --branch nécessite un nom de branche"
+                            exit 1
+                        fi
+                        ;;
+                esac
+                shift
+            done
+            cmd_deploy "$ENV" "$NO_CACHE" "$USE_GIT" "$FROM_REGISTRY" "$REGISTRY_VERSION" "$CUSTOM_BRANCH" "$USE_LOCAL"
+            ;;
+        start)
+            cmd_start "${1:-}"
+            ;;
+        stop)
+            cmd_stop "${1:-}"
+            ;;
+        restart)
+            cmd_restart "${1:-}" "${2:-}"
+            ;;
+        logs)
+            ENV=${1:-""}
+            SERVICE=${2:-""}
+            LINES=${3:-50}
+            FOLLOW=false
+            shift 2 2>/dev/null || shift 1 2>/dev/null || true
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    -f|--follow) FOLLOW=true ;;
+                    *) LINES=$1 ;;
+                esac
+                shift
+            done
+            cmd_logs "$ENV" "$SERVICE" "$LINES" "$FOLLOW"
+            ;;
+        status)
+            cmd_status "${1:-all}"
+            ;;
+        stats)
+            cmd_stats
+            ;;
+        health)
+            cmd_health "${1:-}"
+            ;;
+        shell)
+            cmd_shell "${1:-}" "${2:-api}"
+            ;;
+        exec)
+            ENV=${1:-""}
+            SERVICE=${2:-"api"}
+            shift 2
+            cmd_exec "$ENV" "$SERVICE" "$@"
+            ;;
+        rebuild)
+            ENV=${1:-""}
+            CACHE=false
+            shift
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --cache) CACHE=true ;;
+                esac
+                shift
+            done
+            cmd_rebuild "$ENV" $([ "$CACHE" == "true" ] && echo "false" || echo "true")
+            ;;
+        clean)
+            ENV=${1:-"all"}
+            DEEP=false
+            shift
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --deep) DEEP=true ;;
+                esac
+                shift
+            done
+            cmd_clean "$ENV" "$DEEP"
+            ;;
+        backup)
+            cmd_backup "${1:-}"
+            ;;
+        restore)
+            cmd_restore "${1:-}" "${2:-}"
+            ;;
+        nginx)
+            cmd_nginx "${1:-}" "${2:-}"
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            log_error "Commande inconnue: $COMMAND"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+# Lancer le script
+main "$@"

@@ -1,0 +1,227 @@
+# Configuration DevOps - Template
+# Copiez ce fichier dans votre projet et renommez-le en .devops.yml
+
+# ============================================================================
+# INFORMATIONS DU PROJET
+# ============================================================================
+
+# Nom du projet (utilisé pour les conteneurs, réseaux, volumes)
+project_name: my-project
+
+# Nom du projet Docker Compose (si différent du nom du projet)
+compose_project_name: my-project
+
+# ============================================================================
+# STRUCTURE DU PROJET (optionnel, valeurs par défaut ci-dessous)
+# ============================================================================
+
+# Dossier contenant les fichiers de déploiement (docker-compose, Dockerfiles, etc.)
+# Si non spécifié, cherche à la racine du projet
+deployment_dir: deployment
+
+# Dossier contenant les Dockerfiles
+# Relatif à deployment_dir (ex: deployment/docker/)
+# Si non spécifié: deployment_dir/docker/
+dockerfile_dir: docker
+
+# ============================================================================
+# CONFIGURATION DOCKER REGISTRY
+# ============================================================================
+
+# Nom d'utilisateur du registry Docker (Docker Hub, GitLab, etc.)
+registry_username: your-dockerhub-username
+
+# URL du registry
+# - Docker Hub: docker.io
+# - GitLab: registry.gitlab.com
+# - GitHub: ghcr.io
+# - Registry privé: your-registry.com:5000
+registry_url: docker.io
+
+# Nom de l'image Docker
+# Format final: registry_url/registry_username/image_name:tag
+# Exemple: docker.io/effijeanmermoz/my-project:dev-latest
+image_name: my-project
+
+# ============================================================================
+# CONFIGURATION GIT
+# ============================================================================
+
+# URL du dépôt Git
+# Formats supportés:
+# - HTTPS: https://github.com/username/repo.git
+# - SSH: git@github.com:username/repo.git
+git_repo: https://github.com/your-org/my-project.git
+
+# Token GitHub (optionnel, pour les repos privés)
+# Pour générer un token: https://github.com/settings/tokens
+# Permissions requises: repo
+github_token:
+
+# ============================================================================
+# BRANCHES PAR ENVIRONNEMENT
+# ============================================================================
+
+# Branche pour l'environnement de développement
+dev_branch: dev
+
+# Branche pour l'environnement de staging/pré-production
+staging_branch: staging
+
+# Branche pour l'environnement de production
+prod_branch: main
+
+# ============================================================================
+# PORTS (optionnel, valeurs par défaut si non spécifié)
+# ============================================================================
+
+# Port de l'API en développement (défaut: 8001)
+dev_port: 8001
+
+# Port de l'API en staging (défaut: 8002)
+staging_port: 8002
+
+# Port de l'API en production (défaut: 8000)
+prod_port: 8000
+
+# Port Redis dev (défaut: 6379)
+redis_dev_port: 6379
+
+# Port Redis staging (défaut: 6381)
+redis_staging_port: 6381
+
+# Port Redis prod (défaut: 6380)
+redis_prod_port: 6380
+
+# ============================================================================
+# DOCKER COMPOSE FILES (optionnel, auto-détecté si non spécifié)
+# ============================================================================
+
+# Fichiers docker-compose à utiliser pour chaque environnement
+# Format: base:override1:override2
+# Les chemins sont relatifs à deployment_dir
+# Si non spécifié, utilise: docker-compose.yml:docker-compose.{env}.yml
+compose_files:
+  dev: docker-compose.yml:docker-compose.dev.yml
+  staging: docker-compose.yml:docker-compose.staging.yml
+  prod: docker-compose.yml:docker-compose.prod.yml
+
+# Fichiers docker-compose pour déploiement depuis registry
+# Utilisés lors de "devops deploy --from-registry"
+compose_files_registry:
+  dev: docker-compose.registry.yml:docker-compose.dev-registry.yml
+  staging: docker-compose.registry.yml:docker-compose.staging-registry.yml
+  prod: docker-compose.registry.yml:docker-compose.prod-registry.yml
+
+# ============================================================================
+# SERVEUR DISTANT - CONFIGURATION SSH
+# ============================================================================
+
+# Configuration du serveur de déploiement distant
+# Ces paramètres sont utilisés pour le déploiement SSH vers le serveur cible
+
+# Nom/alias du serveur (utilisé pour identifier la connexion)
+server_name: srv-psm-sih
+
+# Adresse IP ou hostname du serveur
+server_host: 45.67.217.48
+
+# Port SSH (défaut: 22)
+server_port: 22
+
+# Utilisateur SSH pour la connexion
+server_user: akiliya
+
+# Chemin vers la clé privée SSH (optionnel si vous utilisez ssh-agent)
+# Exemple: ~/.ssh/id_rsa_psm_sih
+server_ssh_key: ~/.ssh/id_rsa
+
+# Répertoire de déploiement sur le serveur distant
+# C'est ici que les fichiers seront copiés et où l'application sera exécutée
+server_deploy_path: /home/akiliya/apps
+
+# ============================================================================
+# CONFIGURATION MULTI-SERVEURS (optionnel)
+# ============================================================================
+
+# Vous pouvez définir plusieurs serveurs pour différents environnements
+# servers:
+#   dev:
+#     host: dev.example.com
+#     port: 22
+#     user: deploy
+#     ssh_key: ~/.ssh/id_rsa_dev
+#     deploy_path: /var/www/app-dev
+#   staging:
+#     host: staging.example.com
+#     port: 22
+#     user: deploy
+#     ssh_key: ~/.ssh/id_rsa_staging
+#     deploy_path: /var/www/app-staging
+#   prod:
+#     host: 45.67.217.48
+#     port: 22
+#     user: akiliya
+#     ssh_key: ~/.ssh/id_rsa_psm_sih
+#     deploy_path: /home/akiliya/apps
+
+# ============================================================================
+# VARIABLES PERSONNALISÉES (optionnel)
+# ============================================================================
+
+# Ajoutez vos propres variables ici
+# Elles seront automatiquement exportées et disponibles dans docker-compose
+# Exemple:
+# postgres_user: myuser
+# postgres_password: mypassword
+# postgres_db: mydb
+# postgres_dev_port: 5432
+# rabbitmq_port: 5672
+# mongodb_port: 27017
+
+# ============================================================================
+# NOTES
+# ============================================================================
+#
+# 1. Ce fichier doit être à la racine de votre projet
+#
+# 2. Ne committez PAS ce fichier s'il contient des tokens
+#    Ajoutez-le au .gitignore et créez plutôt un .devops.yml.example
+#
+# 3. Utilisez les fichiers .env.dev, .env.staging, .env.prod
+#    pour les variables d'environnement spécifiques
+#
+# 4. Les variables avec des valeurs par défaut sont optionnelles
+#
+# 5. Structure recommandée du projet:
+#
+#    votre-projet/
+#    ├── .devops.yml              # Ce fichier
+#    ├── deployment/              # Dossier de déploiement (configurable)
+#    │   ├── docker/              # Dockerfiles
+#    │   │   ├── Dockerfile.dev
+#    │   │   ├── Dockerfile.staging
+#    │   │   └── Dockerfile.prod
+#    │   ├── docker-compose.yml              # Base
+#    │   ├── docker-compose.dev.yml          # Dev overrides
+#    │   ├── docker-compose.staging.yml      # Staging overrides
+#    │   ├── docker-compose.prod.yml         # Prod overrides
+#    │   ├── docker-compose.registry.yml     # Registry base
+#    │   ├── docker-compose.dev-registry.yml # Registry dev
+#    │   ├── docker-compose.staging-registry.yml
+#    │   └── docker-compose.prod-registry.yml
+#    ├── .env.dev
+#    ├── .env.staging
+#    ├── .env.prod
+#    └── src/
+#
+# 6. Commandes disponibles:
+#    - devops init              : Créer ce fichier automatiquement
+#    - devops init --template <name> : Initialiser depuis un template
+#    - devops deploy dev        : Déployer en développement
+#    - devops deploy staging    : Déployer en staging
+#    - devops deploy prod       : Déployer en production
+#    - devops deploy dev --from-registry : Déployer depuis registry
+#    - devops package           : Créer un package de déploiement
+#    - devops registry release  : Créer une release sur le registry
+#

@@ -1,0 +1,31 @@
+# Docker Compose - Production Registry Overrides
+
+services:
+  api:
+    ports:
+      - "${PROD_PORT:-8000}:80"
+
+    environment:
+      - ENVIRONMENT=prod
+      - LOG_LEVEL=INFO
+      - WORKERS=4
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+  redis:
+    # Pas de port exposé en production (sécurité)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M

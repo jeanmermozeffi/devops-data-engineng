@@ -1,0 +1,599 @@
+#!/usr/bin/env bash
+
+# ============================================================================
+# DevOps CLI - Gestionnaire de déploiement centralisé
+# ============================================================================
+#
+# Ce script permet de déployer n'importe quel projet depuis un endroit unique
+# Usage: devops <command> [options]
+#
+# ============================================================================
+
+set -e
+
+# Couleurs
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m'
+
+# Chemins - Résoudre le symlink pour trouver le vrai chemin
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+# Résoudre les symlinks (compatible macOS et Linux)
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ $SCRIPT_PATH != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
+done
+DEVOPS_ROOT="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+CURRENT_PROJECT_DIR="$(pwd)"
+
+# ============================================================================
+# FONCTIONS D'AFFICHAGE
+# ============================================================================
+
+log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+log_header() {
+    echo -e "\n${CYAN}========================================${NC}"
+    echo -e "${WHITE}$1${NC}"
+    echo -e "${CYAN}========================================${NC}\n"
+}
+
+# ============================================================================
+# CHARGEMENT DE LA CONFIGURATION
+# ============================================================================
+
+load_project_config() {
+    local config_file="$CURRENT_PROJECT_DIR/.devops.yml"
+
+    if [ ! -f "$config_file" ]; then
+        log_error "Fichier .devops.yml introuvable dans $(pwd)"
+        log_info "Créez-en un avec: devops init"
+        exit 1
+    fi
+
+    log_info "Chargement de la configuration: $config_file"
+
+    # Parser le YAML (simple, supporte uniquement les clés simples)
+    while IFS=': ' read -r key value; do
+        # Ignorer commentaires et lignes vides
+        [[ $key =~ ^#.*$ ]] && continue
+        [[ -z "$key" ]] && continue
+
+        # Nettoyer la valeur
+        value=$(echo "$value" | xargs | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+
+        # Export des variables connues
+        case "$key" in
+            project_name) export PROJECT_NAME="$value" ;;
+            compose_project_name) export COMPOSE_PROJECT_NAME="$value" ;;
+            registry_username) export REGISTRY_USERNAME="$value" ;;
+            registry_url) export REGISTRY_URL="$value" ;;
+            image_name) export IMAGE_NAME="$value" ;;
+            git_repo) export GIT_REPO="$value" ;;
+            github_token) export GITHUB_TOKEN="$value" ;;
+            dev_branch) export DEV_BRANCH="$value" ;;
+            staging_branch) export STAGING_BRANCH="$value" ;;
+            prod_branch) export PROD_BRANCH="$value" ;;
+            dev_port) export DEV_PORT="$value" ;;
+            staging_port) export STAGING_PORT="$value" ;;
+            prod_port) export PROD_PORT="$value" ;;
+            redis_dev_port) export REDIS_DEV_PORT="$value" ;;
+            redis_staging_port) export REDIS_STAGING_PORT="$value" ;;
+            redis_prod_port) export REDIS_PROD_PORT="$value" ;;
+            postgres_user) export POSTGRES_USER="$value" ;;
+            postgres_password) export POSTGRES_PASSWORD="$value" ;;
+            postgres_db) export POSTGRES_DB="$value" ;;
+            postgres_dev_port) export POSTGRES_DEV_PORT="$value" ;;
+            postgres_staging_port) export POSTGRES_STAGING_PORT="$value" ;;
+            postgres_prod_port) export POSTGRES_PROD_PORT="$value" ;;
+            deployment_dir) export DEPLOYMENT_DIR="$value" ;;
+            dockerfile_dir) export DOCKERFILE_DIR="$value" ;;
+            # Configuration serveur distant SSH
+            server_name) export SERVER_NAME="$value" ;;
+            server_host) export SERVER_HOST="$value" ;;
+            server_port) export SERVER_PORT="$value" ;;
+            server_user) export SERVER_USER="$value" ;;
+            server_ssh_key) export SERVER_SSH_KEY="$value" ;;
+            server_deploy_path) export SERVER_DEPLOY_PATH="$value" ;;
+            compose_files|compose_files_registry)
+                # Ignore, sera traité séparément
+                ;;
+            *)
+                # Exporter toutes les autres variables (variables personnalisées)
+                # Convertir clé en MAJUSCULES avec underscores
+                local var_name=$(echo "$key" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+                export "$var_name=$value"
+                ;;
+        esac
+    done < "$config_file"
+
+    # Définir les valeurs par défaut si non spécifiées
+    export PROJECT_NAME="${PROJECT_NAME:-app}"
+    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}"
+    export IMAGE_NAME="${IMAGE_NAME:-$PROJECT_NAME}"
+    export DEV_PORT="${DEV_PORT:-8001}"
+    export STAGING_PORT="${STAGING_PORT:-8002}"
+    export PROD_PORT="${PROD_PORT:-8000}"
+    export REDIS_DEV_PORT="${REDIS_DEV_PORT:-6379}"
+    export REDIS_STAGING_PORT="${REDIS_STAGING_PORT:-6381}"
+    export REDIS_PROD_PORT="${REDIS_PROD_PORT:-6380}"
+    export DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-deployment}"
+    export DOCKERFILE_DIR="${DOCKERFILE_DIR:-docker}"
+
+    # Valeurs par défaut pour le serveur distant SSH
+    export SERVER_PORT="${SERVER_PORT:-22}"
+    export SERVER_DEPLOY_PATH="${SERVER_DEPLOY_PATH:-/home/$SERVER_USER/apps}"
+
+    log_success "Configuration chargée: $PROJECT_NAME"
+}
+
+# Obtenir les fichiers docker-compose pour un environnement
+get_compose_files() {
+    local env=$1
+    local config_file="$CURRENT_PROJECT_DIR/.devops.yml"
+
+    # Chercher la config compose_files pour cet environnement
+    local compose_files_line=$(grep -A 10 "^compose_files:" "$config_file" 2>/dev/null | grep "^  ${env}:" | head -1)
+
+    if [ -n "$compose_files_line" ]; then
+        # Extraire la valeur (format: "  dev: file1:file2:file3")
+        local files=$(echo "$compose_files_line" | cut -d':' -f2- | xargs)
+        echo "$files"
+    else
+        # Valeur par défaut
+        echo "docker-compose.yml:docker-compose.${env}.yml"
+    fi
+}
+
+# Vérifier si le projet a ses propres fichiers docker-compose
+has_project_compose() {
+    local deployment_dir="${DEPLOYMENT_DIR:-deployment}"
+    [ -d "$CURRENT_PROJECT_DIR/$deployment_dir" ] && [ -f "$CURRENT_PROJECT_DIR/$deployment_dir/docker-compose.yml" ]
+}
+
+# ============================================================================
+# COMMANDES
+# ============================================================================
+
+cmd_init() {
+    log_header "INITIALISATION DU PROJET"
+
+    local project_name=$(basename "$CURRENT_PROJECT_DIR")
+
+    log_info "Création de .devops.yml..."
+
+    cat > "$CURRENT_PROJECT_DIR/.devops.yml" <<EOF
+# Configuration DevOps pour $project_name
+# Ce fichier lie votre projet au système de déploiement centralisé
+
+# Nom du projet (utilisé pour les conteneurs, réseaux, volumes)
+project_name: $project_name
+
+# Nom du projet Docker Compose (si différent du nom du projet)
+compose_project_name: $project_name
+
+# Configuration Docker Registry
+registry_username: effijeanmermoz
+registry_url: docker.io
+image_name: $project_name
+
+# Configuration Git
+git_repo: https://github.com/votre-org/${project_name}.git
+github_token: # Optionnel: token pour repos privés
+
+# Branches par environnement
+dev_branch: dev
+staging_branch: staging
+prod_branch: main
+
+# Ports (optionnel, valeurs par défaut ci-dessous)
+dev_port: 8001
+staging_port: 8002
+prod_port: 8000
+redis_dev_port: 6379
+redis_staging_port: 6381
+redis_prod_port: 6380
+
+# ============================================================================
+# SERVEUR DISTANT - CONFIGURATION SSH
+# ============================================================================
+
+# Nom/alias du serveur
+server_name: my-server
+
+# Adresse IP ou hostname du serveur
+server_host:
+
+# Port SSH (défaut: 22)
+server_port: 22
+
+# Utilisateur SSH
+server_user:
+
+# Chemin vers la clé privée SSH
+server_ssh_key: ~/.ssh/id_rsa
+
+# Répertoire de déploiement sur le serveur distant
+server_deploy_path: /home/deploy/apps
+EOF
+
+    log_success ".devops.yml créé"
+    log_info "Éditez ce fichier pour personnaliser la configuration"
+
+    # Ajouter au .gitignore si nécessaire
+    if [ -f "$CURRENT_PROJECT_DIR/.gitignore" ]; then
+        if ! grep -q ".devops.yml" "$CURRENT_PROJECT_DIR/.gitignore"; then
+            echo "" >> "$CURRENT_PROJECT_DIR/.gitignore"
+            echo "# DevOps configuration (peut contenir des tokens)" >> "$CURRENT_PROJECT_DIR/.gitignore"
+            echo ".devops.yml" >> "$CURRENT_PROJECT_DIR/.gitignore"
+            log_info ".devops.yml ajouté au .gitignore"
+        fi
+    fi
+
+    # Créer un template .devops.yml.example
+    cat > "$CURRENT_PROJECT_DIR/.devops.yml.example" <<EOF
+# Configuration DevOps pour $project_name
+# Copiez ce fichier vers .devops.yml et configurez-le
+
+project_name: $project_name
+compose_project_name: $project_name
+
+registry_username: your-dockerhub-username
+registry_url: docker.io
+image_name: $project_name
+
+git_repo: https://github.com/votre-org/${project_name}.git
+github_token: # Optionnel
+
+dev_branch: dev
+staging_branch: staging
+prod_branch: main
+
+# Ports (optionnel)
+dev_port: 8001
+staging_port: 8002
+prod_port: 8000
+redis_dev_port: 6379
+redis_staging_port: 6381
+redis_prod_port: 6380
+EOF
+
+    log_success ".devops.yml.example créé (à versionner)"
+
+    # Créer les fichiers .env si nécessaire
+    for env in dev staging prod; do
+        if [ ! -f "$CURRENT_PROJECT_DIR/.env.$env" ] && [ -f "$CURRENT_PROJECT_DIR/.env.example" ]; then
+            cp "$CURRENT_PROJECT_DIR/.env.example" "$CURRENT_PROJECT_DIR/.env.$env"
+            log_info ".env.$env créé depuis .env.example"
+        fi
+    done
+
+    echo ""
+    log_success "Projet initialisé !"
+    echo ""
+    log_info "Prochaines étapes:"
+    echo "  1. Éditez .devops.yml avec votre configuration"
+    echo "  2. Configurez vos .env.dev, .env.staging, .env.prod"
+    echo "  3. Déployez: devops deploy dev"
+}
+
+cmd_deploy() {
+    load_project_config
+
+    local env=$1
+    shift
+
+    log_header "DÉPLOIEMENT - $PROJECT_NAME ($env)"
+
+    # Vérifier que le dossier deployment existe dans le projet
+    local project_deployment="$CURRENT_PROJECT_DIR/$DEPLOYMENT_DIR"
+    if [ ! -d "$project_deployment" ]; then
+        log_error "Dossier $DEPLOYMENT_DIR introuvable dans le projet"
+        log_info "Structure attendue: $project_deployment"
+        exit 1
+    fi
+
+    # Définir PROJECT_ROOT pour les scripts
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+    export ENV="$env"
+
+    # Les scripts deployment/scripts/deploy.sh utilisent ces variables
+    # Elles ont déjà été exportées par load_project_config()
+
+    # Appeler le script de déploiement centralisé
+    local deploy_script="$DEVOPS_ROOT/scripts/deploy.sh"
+
+    if [ ! -f "$deploy_script" ]; then
+        log_error "Script de déploiement introuvable: $deploy_script"
+        exit 1
+    fi
+
+    log_info "Appel du script: $deploy_script"
+    bash "$deploy_script" deploy "$env" "$@"
+
+    log_success "Déploiement terminé !"
+}
+
+cmd_package() {
+    load_project_config
+
+    log_header "CRÉATION DU PACKAGE - $PROJECT_NAME"
+
+    # Définir PROJECT_ROOT pour les scripts
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    # Appeler le script de création de package centralisé
+    local package_script="$DEVOPS_ROOT/scripts/create-deployment-package.sh"
+
+    if [ ! -f "$package_script" ]; then
+        log_error "Script de package introuvable: $package_script"
+        exit 1
+    fi
+
+    log_info "Appel du script: $package_script"
+    bash "$package_script" "$@"
+
+    log_success "Package créé !"
+}
+
+cmd_registry() {
+    load_project_config
+
+    local action=$1
+    shift
+
+    log_header "REGISTRY - $PROJECT_NAME"
+
+    # Définir PROJECT_ROOT pour les scripts
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    # Appeler le script registry centralisé
+    local registry_script="$DEVOPS_ROOT/scripts/registry.sh"
+
+    if [ ! -f "$registry_script" ]; then
+        log_error "Script registry introuvable: $registry_script"
+        exit 1
+    fi
+
+    log_info "Appel du script: $registry_script"
+    bash "$registry_script" "$action" "$@"
+}
+
+cmd_audit() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local audit_script="$DEVOPS_ROOT/scripts/audit-security.sh"
+    if [ ! -f "$audit_script" ]; then
+        log_error "Script audit-security.sh introuvable"
+        exit 1
+    fi
+
+    log_info "Appel du script: $audit_script"
+    bash "$audit_script" "$@"
+}
+
+cmd_encrypt() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local encrypt_script="$DEVOPS_ROOT/scripts/auto-encrypt-envs.sh"
+    if [ ! -f "$encrypt_script" ]; then
+        log_error "Script auto-encrypt-envs.sh introuvable"
+        exit 1
+    fi
+
+    log_info "Appel du script: $encrypt_script"
+    bash "$encrypt_script" "$@"
+}
+
+cmd_deploy_registry() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local deploy_registry_script="$DEVOPS_ROOT/scripts/deploy-registry.sh"
+    if [ ! -f "$deploy_registry_script" ]; then
+        log_error "Script deploy-registry.sh introuvable"
+        exit 1
+    fi
+
+    log_info "Appel du script: $deploy_registry_script"
+    bash "$deploy_registry_script" "$@"
+}
+
+cmd_interactive() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+    export ENV="${ENV:-dev}"
+
+    while true; do
+        clear
+        echo -e "${CYAN}╔════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║${NC}  ${WHITE}DevOps CLI - ${PROJECT_NAME}${NC}"
+        echo -e "${CYAN}╚════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${WHITE}Commandes disponibles:${NC}"
+        echo ""
+        echo -e "  ${CYAN}1)${NC} ${GREEN}deploy${NC}         - Déployer le projet (build local)"
+        echo -e "  ${CYAN}2)${NC} ${GREEN}package${NC}        - Créer un package de déploiement"
+        echo -e "  ${CYAN}3)${NC} ${GREEN}registry${NC}       - Gérer le Docker Registry"
+        echo -e "  ${CYAN}4)${NC} ${GREEN}deploy-registry${NC} - Déployer depuis Docker Hub"
+        echo -e "  ${CYAN}5)${NC} ${GREEN}audit${NC}          - Audit de sécurité"
+        echo -e "  ${CYAN}6)${NC} ${GREEN}encrypt${NC}        - Chiffrer les fichiers .env"
+        echo ""
+        echo -e "  ${CYAN}h)${NC} ${GREEN}help${NC}           - Afficher l'aide complète"
+        echo -e "  ${CYAN}0)${NC} ${RED}Quitter${NC}"
+        echo ""
+        echo -e "${CYAN}────────────────────────────────────────────────────────${NC}"
+        echo ""
+        read -p "Votre choix: " choice
+
+        case $choice in
+            1)
+                # Lancer deploy.sh en mode interactif
+                local deploy_script="$DEVOPS_ROOT/scripts/deploy.sh"
+                if [ -f "$deploy_script" ]; then
+                    bash "$deploy_script"
+                else
+                    log_error "Script deploy.sh introuvable"
+                fi
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
+            2)
+                # Lancer create-deployment-package.sh en mode interactif (affiche son propre menu)
+                local package_script="$DEVOPS_ROOT/scripts/create-deployment-package.sh"
+                if [ -f "$package_script" ]; then
+                    bash "$package_script"
+                else
+                    log_error "Script create-deployment-package.sh introuvable"
+                fi
+                ;;
+            3)
+                # Lancer registry.sh en mode interactif (affiche son propre menu)
+                local registry_script="$DEVOPS_ROOT/scripts/registry.sh"
+                if [ -f "$registry_script" ]; then
+                    bash "$registry_script"
+                else
+                    log_error "Script registry.sh introuvable"
+                fi
+                ;;
+            4)
+                # Lancer deploy-registry.sh en mode interactif
+                local deploy_registry_script="$DEVOPS_ROOT/scripts/deploy-registry.sh"
+                if [ -f "$deploy_registry_script" ]; then
+                    bash "$deploy_registry_script"
+                else
+                    log_error "Script deploy-registry.sh introuvable"
+                fi
+                ;;
+            5)
+                cmd_audit
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
+            6)
+                cmd_encrypt
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
+            h|H)
+                cmd_help
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
+            0|q|Q)
+                echo ""
+                log_info "Au revoir !"
+                exit 0
+                ;;
+            *)
+                log_error "Option invalide"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+cmd_help() {
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║${NC}  ${WHITE}DevOps CLI - Gestionnaire de déploiement centralisé${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${WHITE}USAGE:${NC}"
+    echo "    devops                          Mode interactif (menu)"
+    echo "    devops <command> [options]      Exécution directe"
+    echo ""
+    echo -e "${WHITE}COMMANDES PRINCIPALES:${NC}"
+    echo ""
+    echo -e "    ${GREEN}init${NC}                    Initialiser un projet avec .devops.yml"
+    echo -e "    ${GREEN}deploy <env>${NC}            Déployer (build local) - dev/staging/prod"
+    echo -e "    ${GREEN}package${NC}                 Créer un package de déploiement"
+    echo ""
+    echo -e "${WHITE}COMMANDES REGISTRY:${NC}"
+    echo ""
+    echo -e "    ${GREEN}registry <action>${NC}       Gérer le Docker Registry (release/push/pull)"
+    echo -e "    ${GREEN}deploy-registry <env>${NC}   Déployer depuis Docker Hub"
+    echo ""
+    echo -e "${WHITE}COMMANDES UTILITAIRES:${NC}"
+    echo ""
+    echo -e "    ${GREEN}audit${NC}                   Audit de sécurité du projet"
+    echo -e "    ${GREEN}encrypt [file]${NC}          Chiffrer les fichiers .env"
+    echo -e "    ${GREEN}help${NC}                    Afficher cette aide"
+    echo ""
+    echo -e "${WHITE}EXEMPLES:${NC}"
+    echo ""
+    echo -e "    ${CYAN}devops${NC}                       # Menu interactif"
+    echo -e "    ${CYAN}devops deploy dev${NC}            # Déployer en dev"
+    echo -e "    ${CYAN}devops package${NC}               # Créer un package"
+    echo -e "    ${CYAN}devops registry release prod v1.0.0${NC}"
+    echo -e "    ${CYAN}devops deploy-registry prod${NC}"
+    echo ""
+    echo -e "${WHITE}CONFIGURATION:${NC}"
+    echo ""
+    echo -e "    Fichier requis: ${CYAN}.devops.yml${NC} à la racine du projet"
+    echo -e "    Créer avec: ${GREEN}devops init${NC}"
+    echo ""
+    echo -e "${WHITE}SCRIPTS:${NC} ${CYAN}$DEVOPS_ROOT/scripts/${NC}"
+    echo ""
+}
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+main() {
+    # Si aucun argument, lancer le mode interactif
+    if [ $# -eq 0 ]; then
+        cmd_interactive
+        exit 0
+    fi
+
+    COMMAND=$1
+    shift
+
+    case "$COMMAND" in
+        init)
+            cmd_init
+            ;;
+        deploy)
+            cmd_deploy "$@"
+            ;;
+        package)
+            cmd_package "$@"
+            ;;
+        registry)
+            cmd_registry "$@"
+            ;;
+        audit)
+            cmd_audit "$@"
+            ;;
+        encrypt)
+            cmd_encrypt "$@"
+            ;;
+        deploy-registry)
+            cmd_deploy_registry "$@"
+            ;;
+        interactive|menu)
+            cmd_interactive
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        *)
+            log_error "Commande inconnue: $COMMAND"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,51 @@
+services:
+    api-prod:
+        build:
+            context: ../..
+            dockerfile: ../docker/Dockerfile.prod
+        image: ${IMAGE_NAME:-api}:prod-latest
+        container_name: ${PROJECT_NAME:-app}-api-prod
+        ports:
+            - "${PROD_PORT:-8000}:80"
+        env_file:
+            - .env.prod
+        volumes:
+            # Monter la clé de chiffrement et le fichier chiffré
+            - ../.env.key:/app/.env.key:ro
+            - ../.env.prod.encrypted:/app/.env.prod.encrypted:ro
+        depends_on:
+            - redis-prod
+        networks:
+            - prod-network
+        restart: always
+        labels:
+            - "environment=prod"
+            - "project=${PROJECT_NAME:-app}"
+        # Pas de volume mount en production pour éviter les modifications accidentelles
+        # Le code est embarqué dans l'image lors du build
+
+    redis-prod:
+        image: redis:7-alpine
+        container_name: ${PROJECT_NAME:-app}-redis-prod
+        ports:
+            - "${REDIS_PROD_PORT:-6380}:6379"
+        volumes:
+            - redis-prod-data:/data
+            - ../.docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+        networks:
+            - prod-network
+        restart: unless-stopped
+        command: redis-server /usr/local/etc/redis/redis.conf
+        labels:
+            - "environment=prod"
+            - "project=${PROJECT_NAME:-app}"
+
+networks:
+    prod-network:
+        name: ${PROJECT_NAME:-app}-prod-network
+        driver: bridge
+
+volumes:
+    redis-prod-data:
+        driver: local
+        name: ${PROJECT_NAME:-app}-redis-prod-data

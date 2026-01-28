@@ -1,0 +1,63 @@
+##############################
+# 1. Phase « builder »
+##############################
+
+FROM python:3.11-slim AS builder
+LABEL authors="effijeanmermoz"
+LABEL environment="staging"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Installer les dépendances système pour psycopg2
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    libc-dev \
+    libssl-dev \
+    make \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copier uniquement les dépendances Python (pour profiter du cache Docker)
+COPY app/requirements.txt .
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+
+##############################
+# 2. Phase « runtime »
+##############################
+
+FROM python:3.11-slim
+LABEL authors="effijeanmermoz"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app/src
+
+# Installer curl pour le healthcheck
+RUN apt-get update && apt-get install -y \
+    curl \
+    libpq5 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Récupérer les paquets Python depuis le builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copier tout le code source
+COPY /app/src /app/src
+
+# Exposer le port 80 (Uvicorn tournera sur 80)
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=3s \
+    CMD curl -f http://localhost:80/health || exit 1
+
+# Production : sans --reload, avec workers multiples
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
