@@ -1,0 +1,101 @@
+# ============================================================================
+# Docker Compose - Configuration Registry
+# Déploiement depuis Docker Hub ou autre registry
+# ============================================================================
+#
+# USAGE:
+#   Mode dev:
+#     docker-compose -f docker-compose.registry.yml -f docker-compose.dev-registry.yml up -d
+#
+#   Mode prod:
+#     docker-compose -f docker-compose.registry.yml -f docker-compose.prod-registry.yml up -d
+#
+#   Avec script:
+#     ./scripts/deploy-registry.sh dev [version]
+#     ./scripts/deploy-registry.sh prod [version]
+#
+# VARIABLES D'ENVIRONNEMENT REQUISES (via .env.registry):
+#   - REGISTRY_URL           : URL du registry (ex: docker.io, ghcr.io)
+#   - REGISTRY_USERNAME      : Nom d'utilisateur du registry
+#   - IMAGE_NAME             : Nom de l'image (ex: cicbi-api-backend)
+#   - IMAGE_TAG              : Tag de l'image (ex: dev-latest, prod-v1.2.3)
+#   - ENVIRONMENT            : Environnement (dev ou prod)
+#
+# ============================================================================
+
+services:
+    cicbi-api:
+        # L'image sera définie via la variable IMAGE_FULL
+        # Format: ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}
+        # Exemple: docker.io/effijeanmermoz/cicbi-api-backend:dev-latest
+        image: ${IMAGE_FULL}
+
+        container_name: cicbi-api-${ENVIRONMENT}
+
+        # Les ports seront surchargés dans les fichiers dev/prod
+
+        # Variables d'environnement spécifiques à l'app
+        # Note: L'application charge AUSSI le fichier .env.encrypted monté en volume
+        # et déchiffre les valeurs sensibles en mémoire, écrasant celles de env_file
+        env_file:
+            - ${ENV_FILE_PATH:-.env.${ENVIRONMENT}}
+
+        # Volumes pour le chiffrement des secrets
+        volumes:
+            # Monter la clé de chiffrement et le fichier chiffré (lecture seule)
+            # Ces fichiers permettent le déchiffrement en mémoire au démarrage
+            # Utilise des variables ENV_KEY_PATH et ENV_ENCRYPTED_PATH définies par le script
+            - ${ENV_KEY_PATH:-../.env.key}:/app/.env.key:ro
+            - ${ENV_ENCRYPTED_PATH:-../.env.${ENVIRONMENT}.encrypted}:/app/.env.${ENVIRONMENT}.encrypted:ro
+
+        # Redis dependency
+        depends_on:
+            - redis
+
+        networks:
+            - cicbi-network
+
+        restart: always
+
+        labels:
+            - "environment=${ENVIRONMENT}"
+            - "image.source=registry"
+            - "image.tag=${IMAGE_TAG}"
+
+        # Healthcheck
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 40s
+
+    redis:
+        image: redis:7-alpine
+        container_name: cicbi-redis-${ENVIRONMENT}
+
+        # Les ports seront surchargés dans les fichiers dev/prod
+
+        volumes:
+            - redis-data:/data
+
+        networks:
+            - cicbi-network
+
+        restart: unless-stopped
+
+        labels:
+            - "environment=${ENVIRONMENT}"
+
+        command: redis-server --appendonly yes
+
+networks:
+    cicbi-network:
+        name: cicbi-${ENVIRONMENT}-network
+        driver: bridge
+
+volumes:
+    redis-data:
+        driver: local
+        name: cicbi-redis-${ENVIRONMENT}-data
+

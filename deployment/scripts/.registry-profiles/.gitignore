@@ -1,0 +1,7 @@
+# Ignorer tous les profils (chiffrés et non chiffrés)
+*.env
+*.env.encrypted
+
+# Garder uniquement le fichier .current si besoin (optionnel)
+# !.current
+

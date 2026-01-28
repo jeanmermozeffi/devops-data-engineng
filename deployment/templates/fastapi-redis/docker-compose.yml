@@ -1,0 +1,63 @@
+# Docker Compose - Base Configuration
+# Stack: FastAPI + Redis
+# Variables injectées depuis .devops.yml via le CLI devops
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/docker/Dockerfile.${ENV:-dev}
+      args:
+        - BUILD_ENV=${ENV:-dev}
+    image: ${IMAGE_NAME}:${ENV}-latest
+    container_name: ${PROJECT_NAME}-api-${ENV}
+    env_file:
+      - ../.env.${ENV}
+    volumes:
+      # Secrets chiffrés (si présents)
+      - ../.env.key:/app/.env.key:ro
+      - ../.env.${ENV}.encrypted:/app/.env.${ENV}.encrypted:ro
+    depends_on:
+      - redis
+    networks:
+      - app-network
+    restart: always
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=api"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${PROJECT_NAME}-redis-${ENV}
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=redis"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  app-network:
+    name: ${PROJECT_NAME}-${ENV}-network
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+    name: ${PROJECT_NAME}-redis-${ENV}-data

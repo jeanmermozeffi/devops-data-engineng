@@ -1,0 +1,49 @@
+services:
+    api-dev:
+        build:
+            context: ../..
+            dockerfile: ../docker/Dockerfile.dev
+        image: ${IMAGE_NAME:-api}:dev-latest
+        container_name: ${PROJECT_NAME:-app}-api-dev
+        ports:
+            - "${DEV_PORT:-8001}:80"
+        env_file:
+            - .env.dev
+        volumes:
+            # Monter la clé de chiffrement et le fichier chiffré pour le mode sécurisé
+            - ../.env.key:/app/.env.key:ro
+            - ../.env.dev.encrypted:/app/.env.dev.encrypted:ro
+        depends_on:
+            - redis-dev
+        networks:
+            - dev-network
+        restart: always
+        labels:
+            - "environment=dev"
+            - "project=${PROJECT_NAME:-app}"
+        # Note: Code embarqué dans l'image lors du build
+        # Pour mettre à jour le code, redéployer avec: devops deploy dev
+
+    redis-dev:
+        image: redis:7-alpine
+        container_name: ${PROJECT_NAME:-app}-redis-dev
+        ports:
+            - "${REDIS_DEV_PORT:-6379}:6379"
+        volumes:
+            - redis-dev-data:/data
+        networks:
+            - dev-network
+        restart: unless-stopped
+        labels:
+            - "environment=dev"
+            - "project=${PROJECT_NAME:-app}"
+
+networks:
+    dev-network:
+        name: ${PROJECT_NAME:-app}-dev-network
+        driver: bridge
+
+volumes:
+    redis-dev-data:
+        driver: local
+        name: ${PROJECT_NAME:-app}-redis-dev-data

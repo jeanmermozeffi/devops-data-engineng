@@ -1,0 +1,14 @@
+# Docker Compose - Development Registry Overrides
+
+services:
+  api:
+    ports:
+      - "${DEV_PORT:-8001}:80"
+
+    environment:
+      - ENVIRONMENT=dev
+      - LOG_LEVEL=DEBUG
+
+  redis:
+    ports:
+      - "${REDIS_DEV_PORT:-6379}:6379"  # Exposé pour debug

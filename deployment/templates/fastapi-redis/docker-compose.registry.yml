@@ -1,0 +1,73 @@
+# Docker Compose - Registry Base Configuration
+# Déploiement depuis Docker Hub ou autre registry
+# Variables injectées depuis .devops.yml
+
+services:
+  api:
+    # Image depuis le registry
+    image: ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${ENV}-latest
+    container_name: ${PROJECT_NAME}-api-${ENV}
+
+    env_file:
+      - ../.env.${ENV}
+
+    volumes:
+      # Secrets chiffrés (si présents)
+      - ../.env.key:/app/.env.key:ro
+      - ../.env.${ENV}.encrypted:/app/.env.${ENV}.encrypted:ro
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    networks:
+      - app-network
+
+    restart: always
+
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=api"
+      - "image.source=registry"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${PROJECT_NAME}-redis-${ENV}
+    command: redis-server --appendonly yes
+
+    volumes:
+      - redis-data:/data
+
+    networks:
+      - app-network
+
+    restart: unless-stopped
+
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=redis"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  app-network:
+    name: ${PROJECT_NAME}-${ENV}-network
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local
+    name: ${PROJECT_NAME}-redis-${ENV}-data

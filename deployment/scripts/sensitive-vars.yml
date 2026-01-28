@@ -1,0 +1,151 @@
+# Configuration des variables sensibles à chiffrer
+# Ce fichier définit les patterns de noms de variables qui doivent être chiffrées
+
+# ============================================================================
+# Patterns de variables sensibles
+# ============================================================================
+# Le script cherche ces mots-clés dans le NOM de la variable (insensible à la casse)
+# Exemple: DATABASE_PASSWORD, JWT_SECRET_KEY, API_TOKEN, etc.
+
+sensitive_patterns:
+  # Mots-clés génériques
+  - PASSWORD
+  - SECRET
+  - KEY
+  - TOKEN
+  - PRIVATE
+  - CREDENTIAL
+  - AUTH
+  - CERTIFICATE
+  - CERT
+
+  # Variables spécifiques (nom exact)
+  - DATABASE_PASSWORD
+  - DATABASE_USER  # Optionnel: peut aussi être sensible
+  - POSTGRES_PASSWORD
+  - MYSQL_PASSWORD
+  - MONGO_PASSWORD
+
+  - JWT_SECRET_KEY
+  - JWT_PRIVATE_KEY
+  - SECRET_KEY
+  - ENCRYPTION_KEY
+  - FERNET_KEY
+
+  - GITHUB_TOKEN
+  - GITLAB_TOKEN
+  - BITBUCKET_TOKEN
+  - GIT_TOKEN
+
+  - REDIS_PASSWORD
+  - REDIS_AUTH
+
+  - API_KEY
+  - API_SECRET
+  - API_TOKEN
+
+  - SENTRY_DSN
+  - SENTRY_AUTH_TOKEN
+
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_SESSION_TOKEN
+
+  - AZURE_CLIENT_SECRET
+  - AZURE_TENANT_ID
+
+  - GOOGLE_CREDENTIALS
+  - GOOGLE_APPLICATION_CREDENTIALS
+
+  - SMTP_PASSWORD
+  - EMAIL_PASSWORD
+  - MAIL_PASSWORD
+
+  - OAUTH_CLIENT_SECRET
+  - OAUTH_TOKEN
+
+  - STRIPE_SECRET_KEY
+  - STRIPE_API_KEY
+
+  - PAYPAL_SECRET
+  - PAYPAL_CLIENT_SECRET
+
+# ============================================================================
+# Variables à NE JAMAIS chiffrer
+# ============================================================================
+# Même si elles contiennent un mot-clé sensible, ces variables restent en clair
+
+exclude_patterns:
+  - PUBLIC_KEY  # Clé publique (peut rester en clair)
+  - JWT_PUBLIC_KEY
+  - ENCRYPTION_ALGORITHM  # Nom d'algorithme, pas un secret
+  - SECRET_EXAMPLE  # Valeur d'exemple
+  - TOKEN_EXPIRY  # Durée, pas un secret
+  - ACCESS_TOKEN_EXPIRE_MINUTES  # Durée en minutes, pas un secret
+  - PASSWORD_MIN_LENGTH  # Configuration, pas un mot de passe
+  - KEY_TYPE  # Type de clé, pas une clé réelle
+  - TLS_CERT  # Chemin vers certificat, pas le certificat lui-même
+  - TLS_KEY  # Chemin vers clé, pas la clé elle-même
+  - SSL_CERT  # Chemin vers certificat SSL
+  - SSL_KEY  # Chemin vers clé SSL
+
+# ============================================================================
+# Valeurs à ignorer (ne pas chiffrer même si la variable est sensible)
+# ============================================================================
+# Si la valeur correspond à ces patterns, on ne la chiffre pas
+
+ignore_values:
+  - changeme
+  - CHANGEZ_CETTE_CLE
+  - YOUR_SECRET_HERE
+  - xxx
+  - ""
+  # Note: "null" entre quotes pour la chaîne littérale, pas le type null
+  - "null"
+  - "NULL"
+
+# ============================================================================
+# Configuration avancée
+# ============================================================================
+
+options:
+  # Sensibilité à la casse pour les patterns
+  case_sensitive: false
+
+  # Chiffrer les variables dont le nom contient EXACTEMENT le pattern
+  exact_match: false
+
+  # Chiffrer les variables dont le nom CONTIENT le pattern
+  partial_match: true
+
+  # Afficher un avertissement pour les variables sensibles non chiffrées
+  warn_on_sensitive_in_clear: true
+
+  # Format du marqueur de chiffrement
+  encrypted_marker_prefix: "ENC["
+  encrypted_marker_suffix: "]"
+
+  # Permissions du fichier de sortie (384 en décimal = 0o600 en octal = rw-------)
+  # Note: YAML ne supporte pas la notation octale 0o600, utiliser décimal
+  output_file_permissions: 384  # 0o600 = 384
+
+# ============================================================================
+# Exemples de détection
+# ============================================================================
+#
+# Variables qui SERONT chiffrées:
+#   DATABASE_PASSWORD=secret123          → Contient PASSWORD
+#   JWT_SECRET_KEY=mykey                 → Contient SECRET et KEY
+#   GITHUB_TOKEN=ghp_xxx                 → Contient TOKEN
+#   MY_API_KEY=abc123                    → Contient KEY
+#   SMTP_PASSWORD=pass                   → Contient PASSWORD
+#
+# Variables qui NE seront PAS chiffrées:
+#   DATABASE_HOST=localhost              → Pas de pattern sensible
+#   APP_ENV=production                   → Pas de pattern sensible
+#   PUBLIC_KEY=ssh-rsa...                → Dans exclude_patterns
+#   DATABASE_PASSWORD=changeme           → Valeur dans ignore_values
+#   DEBUG=true                           → Pas de pattern sensible
+#
+# ============================================================================
+

@@ -1,0 +1,19 @@
+# ============================================================================
+# Dépendances Python pour le chiffrement des fichiers .env
+# ============================================================================
+#
+# Installation :
+#   pip install -r requirements-encryption.txt
+#
+# Ou avec environnement virtuel (recommandé) :
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements-encryption.txt
+#
+# ============================================================================
+
+# Cryptographie (chiffrement Fernet/AES)
+cryptography>=41.0.0,<43.0.0
+
+# YAML (lecture du fichier sensitive-vars.yml)
+PyYAML>=6.0,<7.0
