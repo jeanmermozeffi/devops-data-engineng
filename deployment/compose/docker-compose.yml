@@ -1,0 +1,72 @@
+# ============================================================================
+# Docker Compose - Base Configuration (Build Local)
+# Stack: FastAPI + Redis
+# ============================================================================
+#
+# VARIABLES REQUISES (injectées depuis .devops.yml):
+#   - PROJECT_NAME, ENV, IMAGE_NAME
+#
+# NOMMAGE: ${PROJECT_NAME}-{service}-${ENV}
+#   Exemple: cicbi-api-backend-api-dev, cicbi-api-backend-redis-dev
+#
+# ============================================================================
+
+services:
+  __PROJECT_NAME__-api-__ENV__:
+    build:
+      context: ..
+      dockerfile: deployment/docker/Dockerfile.${ENV:-dev}
+      args:
+        - BUILD_ENV=${ENV:-dev}
+    image: ${IMAGE_NAME}:${ENV}-latest
+    container_name: __PROJECT_NAME__-api-__ENV__
+    env_file:
+      - ../.env.${ENV}
+    volumes:
+      - ../.env.key:/app/.env.key:ro
+      - ../.env.${ENV}.encrypted:/app/.env.${ENV}.encrypted:ro
+    depends_on:
+      __PROJECT_NAME__-redis-__ENV__:
+        condition: service_healthy
+    networks:
+      - __PROJECT_NAME__-__ENV__-network
+    restart: always
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=api"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  __PROJECT_NAME__-redis-__ENV__:
+    image: redis:7-alpine
+    container_name: __PROJECT_NAME__-redis-__ENV__
+    command: redis-server --appendonly yes
+    volumes:
+      - __PROJECT_NAME__-redis-__ENV__-data:/data
+    networks:
+      - __PROJECT_NAME__-__ENV__-network
+    restart: unless-stopped
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=${ENV}"
+      - "service=redis"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  __PROJECT_NAME__-__ENV__-network:
+    name: __PROJECT_NAME__-__ENV__-network
+    driver: bridge
+
+volumes:
+  __PROJECT_NAME__-redis-__ENV__-data:
+    driver: local
+    name: __PROJECT_NAME__-redis-__ENV__-data

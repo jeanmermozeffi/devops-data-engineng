@@ -7,30 +7,24 @@
 #   Mode dev:
 #     docker-compose -f docker-compose.registry.yml -f docker-compose.dev-registry.yml up -d
 #
-#   Mode prod:
-#     docker-compose -f docker-compose.registry.yml -f docker-compose.prod-registry.yml up -d
-#
 #   Avec script:
-#     ./scripts/deploy-registry.sh dev [version]
-#     ./scripts/deploy-registry.sh prod [version]
+#     devops deploy-registry dev [version]
 #
-# VARIABLES D'ENVIRONNEMENT REQUISES (via .env.registry):
-#   - REGISTRY_URL           : URL du registry (ex: docker.io, ghcr.io)
-#   - REGISTRY_USERNAME      : Nom d'utilisateur du registry
-#   - IMAGE_NAME             : Nom de l'image (ex: cicbi-api-backend)
-#   - IMAGE_TAG              : Tag de l'image (ex: dev-latest, prod-v1.2.3)
-#   - ENVIRONMENT            : Environnement (dev ou prod)
+# VARIABLES REQUISES (injectées depuis .devops.yml):
+#   - PROJECT_NAME, ENV, REGISTRY_URL, REGISTRY_USERNAME, IMAGE_NAME, IMAGE_TAG
+#
+# NOMMAGE: ${PROJECT_NAME}-{service}-${ENV}
+#   Exemple: cicbi-api-backend-api-dev, cicbi-api-backend-redis-dev
 #
 # ============================================================================
 
 services:
-    cicbi-api:
+    __PROJECT_NAME__-api-__ENV__:
         # L'image sera définie via la variable IMAGE_FULL
         # Format: ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}
         # Exemple: docker.io/effijeanmermoz/cicbi-api-backend:dev-latest
-        image: ${IMAGE_FULL}
-
-        container_name: cicbi-api-${ENVIRONMENT}
+        image: ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${ENV}-${IMAGE_TAG:-latest}
+        container_name: __PROJECT_NAME__-api-__ENV__
 
         # Les ports seront surchargés dans les fichiers dev/prod
 
@@ -38,29 +32,31 @@ services:
         # Note: L'application charge AUSSI le fichier .env.encrypted monté en volume
         # et déchiffre les valeurs sensibles en mémoire, écrasant celles de env_file
         env_file:
-            - ${ENV_FILE_PATH:-.env.${ENVIRONMENT}}
+            - ../.env.${ENV}
 
         # Volumes pour le chiffrement des secrets
         volumes:
             # Monter la clé de chiffrement et le fichier chiffré (lecture seule)
             # Ces fichiers permettent le déchiffrement en mémoire au démarrage
             # Utilise des variables ENV_KEY_PATH et ENV_ENCRYPTED_PATH définies par le script
-            - ${ENV_KEY_PATH:-../.env.key}:/app/.env.key:ro
-            - ${ENV_ENCRYPTED_PATH:-../.env.${ENVIRONMENT}.encrypted}:/app/.env.${ENVIRONMENT}.encrypted:ro
+            - ../.env.key:/app/.env.key:ro
+            - ../.env.${ENV}.encrypted:/app/.env.${ENV}.encrypted:ro
 
         # Redis dependency
         depends_on:
-            - redis
+            __PROJECT_NAME__-redis-__ENV__:
+                condition: service_healthy
 
         networks:
-            - cicbi-network
+            - __PROJECT_NAME__-__ENV__-network
 
         restart: always
 
         labels:
-            - "environment=${ENVIRONMENT}"
+            - "project=${PROJECT_NAME}"
+            - "environment=${ENV}"
+            - "service=api"
             - "image.source=registry"
-            - "image.tag=${IMAGE_TAG}"
 
         # Healthcheck
         healthcheck:
@@ -70,32 +66,40 @@ services:
             retries: 3
             start_period: 40s
 
-    redis:
+    __PROJECT_NAME__-redis-__ENV__:
         image: redis:7-alpine
-        container_name: cicbi-redis-${ENVIRONMENT}
+        container_name: __PROJECT_NAME__-redis-__ENV__
 
         # Les ports seront surchargés dans les fichiers dev/prod
 
         volumes:
-            - redis-data:/data
+            - __PROJECT_NAME__-redis-__ENV__-data:/data
 
         networks:
-            - cicbi-network
+            - __PROJECT_NAME__-__ENV__-network
 
         restart: unless-stopped
 
         labels:
-            - "environment=${ENVIRONMENT}"
+            - "project=${PROJECT_NAME}"
+            - "environment=${ENV}"
+            - "service=redis"
 
         command: redis-server --appendonly yes
 
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
 networks:
-    cicbi-network:
-        name: cicbi-${ENVIRONMENT}-network
+    __PROJECT_NAME__-__ENV__-network:
+        name: __PROJECT_NAME__-__ENV__-network
         driver: bridge
 
 volumes:
-    redis-data:
+    __PROJECT_NAME__-redis-__ENV__-data:
         driver: local
-        name: cicbi-redis-${ENVIRONMENT}-data
+        name: __PROJECT_NAME__-redis-__ENV__-data
 

@@ -72,24 +72,30 @@ print_separator() {
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOYMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Détecter PROJECT_ROOT de manière robuste
-# Si on est dans /srv/home/${PROJECT_NAME:-app}/scripts, alors PROJECT_ROOT = /srv/home/${PROJECT_NAME:-app}
-if [[ "$DEPLOYMENT_DIR" == */${PROJECT_NAME:-app} ]]; then
-    PROJECT_ROOT="$DEPLOYMENT_DIR"
-else
-    # Fallback: remonter d'un niveau
-    PROJECT_ROOT="$(cd "$DEPLOYMENT_DIR/.." && pwd)"
+# Charger la configuration depuis .devops.yml (définit PROJECT_ROOT, PROJECT_NAME, etc.)
+source "$SCRIPT_DIR/config-loader.sh"
+load_devops_config
+
+# Si PROJECT_ROOT n'est pas défini (ancien comportement), utiliser ../..
+if [ -z "$PROJECT_ROOT" ]; then
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    export PROJECT_ROOT
 fi
+
+# DEPLOYMENT_DIR relatif au projet
+DEPLOYMENT_DIR="$PROJECT_ROOT/deployment"
+
+# Se placer dans le répertoire du projet
+cd "$PROJECT_ROOT"
 
 # Debug: afficher les chemins au démarrage (décommentez pour diagnostiquer)
 # echo "DEBUG: SCRIPT_DIR=$SCRIPT_DIR" >&2
 # echo "DEBUG: DEPLOYMENT_DIR=$DEPLOYMENT_DIR" >&2
 # echo "DEBUG: PROJECT_ROOT=$PROJECT_ROOT" >&2
 
-# Nom du projet Docker Compose (pour éviter d'utiliser "deployment" comme nom)
-export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}"
+# Nom du projet Docker Compose (chargé depuis .devops.yml ou fallback)
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
 
 # Dossier des profils registry (partagé avec registry.sh)
 PROFILES_DIR="$SCRIPT_DIR/.registry-profiles"
@@ -463,7 +469,9 @@ check_image_exists() {
 # Obtenir les fichiers docker-compose à utiliser
 get_compose_files() {
     local env=$1
-    echo "-f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
+    # --env-file est nécessaire pour la substitution de variables dans le YAML
+    # (env_file dans docker-compose.yml charge les variables dans le container, pas pour le parsing YAML)
+    echo "--env-file ../.env.${env} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
 }
 
 # ============================================================================
@@ -1658,11 +1666,19 @@ cmd_deploy() {
         cleanup_needed=true
     fi
 
-    # Exporter les variables pour docker-compose
+    # Exporter les variables pour docker-compose (substitution YAML)
+    # ENV est utilisé dans docker-compose.yml pour ${ENV}
+    export ENV=$env
     export ENVIRONMENT=$env
     export IMAGE_TAG=$tag
     export IMAGE_FULL=$image_full
     export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+
+    # Exporter les variables de .devops.yml pour docker-compose
+    export PROJECT_NAME="${PROJECT_NAME}"
+    export REGISTRY_URL="${REGISTRY_URL}"
+    export REGISTRY_USERNAME="${REGISTRY_USERNAME}"
+    export IMAGE_NAME="${IMAGE_NAME}"
 
     # Exporter le chemin du fichier .env pour docker-compose
     # Sur le serveur déployé (sans deployment/), le fichier est dans le répertoire courant
@@ -1717,6 +1733,9 @@ cmd_deploy() {
 
     log_success "Fichier .env.$env prêt pour docker-compose"
 
+    # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
+    # (pas besoin de sourcer le fichier dans le shell)
+
     cd "$DEPLOYMENT_DIR"
 
     # Arrêter les conteneurs existants
@@ -1766,12 +1785,30 @@ cmd_pull() {
     docker images "$image_full"
 }
 
+# Exporter toutes les variables nécessaires pour docker-compose
+export_compose_vars() {
+    local env=$1
+
+    # Variables pour substitution YAML dans docker-compose
+    # Ces variables sont définies dans .devops.yml et doivent être exportées
+    # pour que docker compose puisse les utiliser dans le fichier YAML
+    export ENV=$env
+    export ENVIRONMENT=$env
+    export PROJECT_NAME="${PROJECT_NAME}"
+    export REGISTRY_URL="${REGISTRY_URL}"
+    export REGISTRY_USERNAME="${REGISTRY_USERNAME}"
+    export IMAGE_NAME="${IMAGE_NAME}"
+    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+
+    # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
+    # (pas besoin de sourcer le fichier dans le shell)
+}
+
 # Afficher le statut des conteneurs
 cmd_status() {
     local env=$1
 
-    export ENVIRONMENT=$env
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export_compose_vars "$env"
 
     log_header "STATUS - Environnement: $env"
 
@@ -1784,8 +1821,7 @@ cmd_logs() {
     local env=$1
     local service=${2:-${IMAGE_NAME:-api}}
 
-    export ENVIRONMENT=$env
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export_compose_vars "$env"
 
     log_header "LOGS - $service ($env)"
 
@@ -1797,8 +1833,7 @@ cmd_logs() {
 cmd_stop() {
     local env=$1
 
-    export ENVIRONMENT=$env
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export_compose_vars "$env"
 
     log_header "ARRÊT - Environnement: $env"
 
@@ -1812,8 +1847,7 @@ cmd_stop() {
 cmd_restart() {
     local env=$1
 
-    export ENVIRONMENT=$env
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export_compose_vars "$env"
 
     log_header "REDÉMARRAGE - Environnement: $env"
 

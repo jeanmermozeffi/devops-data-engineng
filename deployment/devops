@@ -102,6 +102,11 @@ load_project_config() {
             server_user) export SERVER_USER="$value" ;;
             server_ssh_key) export SERVER_SSH_KEY="$value" ;;
             server_deploy_path) export SERVER_DEPLOY_PATH="$value" ;;
+            # Structure du projet
+            app_source_dir) export APP_SOURCE_DIR="$value" ;;
+            requirements_path) export REQUIREMENTS_PATH="$value" ;;
+            app_entrypoint) export APP_ENTRYPOINT="$value" ;;
+            workdir) export WORKDIR="$value" ;;
             compose_files|compose_files_registry)
                 # Ignore, sera traité séparément
                 ;;
@@ -130,6 +135,12 @@ load_project_config() {
     # Valeurs par défaut pour le serveur distant SSH
     export SERVER_PORT="${SERVER_PORT:-22}"
     export SERVER_DEPLOY_PATH="${SERVER_DEPLOY_PATH:-/home/$SERVER_USER/apps}"
+
+    # Valeurs par défaut pour la structure du projet
+    export APP_SOURCE_DIR="${APP_SOURCE_DIR:-app}"
+    export REQUIREMENTS_PATH="${REQUIREMENTS_PATH:-requirements.txt}"
+    export APP_ENTRYPOINT="${APP_ENTRYPOINT:-app.main:app}"
+    export WORKDIR="${WORKDIR:-/app}"
 
     log_success "Configuration chargée: $PROJECT_NAME"
 }
@@ -166,7 +177,12 @@ cmd_init() {
     log_header "INITIALISATION DU PROJET"
 
     local project_name=$(basename "$CURRENT_PROJECT_DIR")
+    local deployment_dir="$CURRENT_PROJECT_DIR/deployment"
+    local docker_dir="$deployment_dir/docker"
 
+    # =========================================================================
+    # 1. Création du fichier .devops.yml
+    # =========================================================================
     log_info "Création de .devops.yml..."
 
     cat > "$CURRENT_PROJECT_DIR/.devops.yml" <<EOF
@@ -202,6 +218,45 @@ redis_staging_port: 6381
 redis_prod_port: 6380
 
 # ============================================================================
+# STRUCTURE DU PROJET
+# ============================================================================
+# Adaptez ces chemins selon la structure de votre projet
+#
+# Exemples de structures courantes:
+#
+#   FastAPI Standard (recommandé):
+#     app_source_dir: app
+#     requirements_path: requirements.txt
+#     app_entrypoint: app.main:app
+#
+#   FastAPI avec src/:
+#     app_source_dir: app/src
+#     requirements_path: app/requirements.txt
+#     app_entrypoint: src.main:app
+#
+#   Django:
+#     app_source_dir: src
+#     requirements_path: requirements.txt
+#     app_entrypoint: config.wsgi:application
+#
+#   Node.js/Angular:
+#     app_source_dir: src
+#     requirements_path: package.json
+#     app_entrypoint: dist/main.js
+
+# Dossier contenant le code source (relatif à la racine du projet)
+app_source_dir: app
+
+# Chemin vers requirements.txt ou package.json (relatif à la racine)
+requirements_path: requirements.txt
+
+# Point d'entrée de l'application (pour uvicorn/gunicorn)
+app_entrypoint: app.main:app
+
+# Dossier de travail dans le conteneur
+workdir: /app
+
+# ============================================================================
 # SERVEUR DISTANT - CONFIGURATION SSH
 # ============================================================================
 
@@ -225,7 +280,6 @@ server_deploy_path: /home/deploy/apps
 EOF
 
     log_success ".devops.yml créé"
-    log_info "Éditez ce fichier pour personnaliser la configuration"
 
     # Ajouter au .gitignore si nécessaire
     if [ -f "$CURRENT_PROJECT_DIR/.gitignore" ]; then
@@ -267,7 +321,72 @@ EOF
 
     log_success ".devops.yml.example créé (à versionner)"
 
-    # Créer les fichiers .env si nécessaire
+    # =========================================================================
+    # 2. Création du dossier deployment/ (copie depuis templates)
+    # =========================================================================
+    log_info "Création du dossier deployment/..."
+
+    mkdir -p "$docker_dir"
+
+    # =========================================================================
+    # 2.1 Copie des Dockerfiles depuis les templates
+    # =========================================================================
+    log_info "Copie des Dockerfiles..."
+
+    # Copier tous les Dockerfiles depuis $DEVOPS_ROOT/docker/
+    for dockerfile in "$DEVOPS_ROOT/docker/Dockerfile."*; do
+        if [ -f "$dockerfile" ]; then
+            cp "$dockerfile" "$docker_dir/"
+            log_info "  -> $(basename "$dockerfile")"
+        fi
+    done
+
+    # Copier le .gitignore si présent
+    if [ -f "$DEVOPS_ROOT/docker/.gitignore" ]; then
+        cp "$DEVOPS_ROOT/docker/.gitignore" "$docker_dir/"
+    fi
+
+    log_success "Dockerfiles copiés (dev, staging, prod + versions .git)"
+
+    # =========================================================================
+    # 2.2 Copie des fichiers docker-compose depuis les templates
+    # =========================================================================
+    log_info "Copie des fichiers docker-compose..."
+
+    # Copier tous les docker-compose depuis $DEVOPS_ROOT/compose/
+    # et remplacer les placeholders par les valeurs du projet
+    for composefile in "$DEVOPS_ROOT/compose/docker-compose"*.yml; do
+        if [ -f "$composefile" ]; then
+            local filename=$(basename "$composefile")
+            # Copier et remplacer les placeholders
+            sed -e "s/__PROJECT_NAME__/${project_name}/g" \
+                "$composefile" > "$deployment_dir/$filename"
+            log_info "  -> $filename"
+        fi
+    done
+
+    # Remplacer __ENV__ par l'environnement approprié dans chaque fichier
+    for env in dev staging prod; do
+        for suffix in "" "-registry"; do
+            local file="$deployment_dir/docker-compose.${env}${suffix}.yml"
+            if [ -f "$file" ]; then
+                sed -i '' "s/__ENV__/${env}/g" "$file"
+            fi
+        done
+    done
+    # Pour les fichiers de base (docker-compose.yml et docker-compose.registry.yml)
+    # garder ${ENV} comme variable dynamique
+    for file in "$deployment_dir/docker-compose.yml" "$deployment_dir/docker-compose.registry.yml"; do
+        if [ -f "$file" ]; then
+            sed -i '' 's/__ENV__/${ENV}/g' "$file"
+        fi
+    done
+
+    log_success "docker-compose copiés et personnalisés pour $project_name"
+
+    # =========================================================================
+    # 2.3 Créer les fichiers .env si nécessaire
+    # =========================================================================
     for env in dev staging prod; do
         if [ ! -f "$CURRENT_PROJECT_DIR/.env.$env" ] && [ -f "$CURRENT_PROJECT_DIR/.env.example" ]; then
             cp "$CURRENT_PROJECT_DIR/.env.example" "$CURRENT_PROJECT_DIR/.env.$env"
@@ -275,13 +394,37 @@ EOF
         fi
     done
 
+    # =========================================================================
+    # Résumé
+    # =========================================================================
     echo ""
-    log_success "Projet initialisé !"
+    log_success "Projet initialisé avec succès !"
+    echo ""
+    echo -e "${WHITE}Structure créée:${NC}"
+    echo "  ├── .devops.yml              (configuration)"
+    echo "  ├── .devops.yml.example      (template à versionner)"
+    echo "  └── deployment/"
+    echo "      ├── docker/"
+    echo "      │   ├── Dockerfile.dev          (build local)"
+    echo "      │   ├── Dockerfile.staging"
+    echo "      │   ├── Dockerfile.prod"
+    echo "      │   ├── Dockerfile.dev.git      (clone depuis Git)"
+    echo "      │   ├── Dockerfile.staging.git"
+    echo "      │   └── Dockerfile.prod.git"
+    echo "      ├── docker-compose.yml         (base - build local)"
+    echo "      ├── docker-compose.dev.yml"
+    echo "      ├── docker-compose.staging.yml"
+    echo "      ├── docker-compose.prod.yml"
+    echo "      ├── docker-compose.registry.yml     (base - registry)"
+    echo "      ├── docker-compose.dev-registry.yml"
+    echo "      ├── docker-compose.staging-registry.yml"
+    echo "      └── docker-compose.prod-registry.yml"
     echo ""
     log_info "Prochaines étapes:"
     echo "  1. Éditez .devops.yml avec votre configuration"
-    echo "  2. Configurez vos .env.dev, .env.staging, .env.prod"
-    echo "  3. Déployez: devops deploy dev"
+    echo "  2. Adaptez les Dockerfiles si besoin (Node.js, Go, etc.)"
+    echo "  3. Configurez vos .env.dev, .env.staging, .env.prod"
+    echo "  4. Déployez: devops deploy dev"
 }
 
 cmd_deploy() {

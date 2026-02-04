@@ -1,76 +1,71 @@
 ##############################
 # Dockerfile PROD - Clone depuis Git
-# Build: docker build --build-arg GIT_REPO=https://github.com/org/repo.git --build-arg GIT_BRANCH=main --secret id=github_token,src=$HOME/.github_token -f deployment/docker/Dockerfile.prod.git -t project-name:prod .
-# Note: GIT_REPO doit être passé en argument lors du build
+##############################
+#
+# BUILD:
+#   docker build \
+#     --build-arg GIT_REPO=https://github.com/org/repo.git \
+#     --build-arg GIT_BRANCH=main \
+#     --build-arg APP_SOURCE_DIR=app \
+#     --build-arg REQUIREMENTS_PATH=requirements.txt \
+#     --build-arg APP_ENTRYPOINT=app.main:app \
+#     --secret id=github_token,src=$HOME/.github_token \
+#     -f deployment/docker/Dockerfile.prod.git \
+#     -t project-name:prod .
+#
 ##############################
 
 ##############################
 # 1. Phase « git-cloner »
-# Clone le code depuis Git EN PREMIER
 ##############################
 
 FROM python:3.11-slim AS git-cloner
 
-# Arguments de build pour le repo Git (GIT_REPO doit être passé lors du build)
 ARG GIT_BRANCH=main
 ARG GIT_REPO
 
-# Installer Git
 RUN apt-get update && apt-get install -y git \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
 
-# Cloner le repo avec authentification si token fourni via secret
-# Note: Le token est utilisé comme secret Docker et n'est jamais persisté dans l'image
 RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=git_username \
     if [ -f /run/secrets/github_token ]; then \
-        echo "Clonage avec authentification depuis ${GIT_REPO}..."; \
         GIT_TOKEN=$(cat /run/secrets/github_token | tr -d '\n\r\t ') && \
         REPO_PATH=$(echo ${GIT_REPO} | sed 's|https://||') && \
         if echo "${GIT_REPO}" | grep -q "gitlab.com"; then \
-            echo "Détection GitLab"; \
             if [ -f /run/secrets/git_username ]; then \
                 GIT_USER=$(cat /run/secrets/git_username | tr -d '\n\r\t '); \
-                echo "Utilisation du username: ${GIT_USER}"; \
                 REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${REPO_PATH}"; \
             else \
-                echo "Pas de username fourni, tentative avec le token seul"; \
                 REPO_URL="https://oauth2:${GIT_TOKEN}@${REPO_PATH}"; \
             fi; \
         else \
-            echo "Détection GitHub - Utilisation de oauth2"; \
             REPO_URL="https://oauth2:${GIT_TOKEN}@${REPO_PATH}"; \
         fi && \
         git clone --branch ${GIT_BRANCH} --depth 1 "${REPO_URL}" app && \
         unset GIT_TOKEN GIT_USER REPO_URL REPO_PATH; \
     else \
-        echo "Clonage sans authentification depuis ${GIT_REPO}..."; \
         git clone --branch ${GIT_BRANCH} --depth 1 ${GIT_REPO} app; \
     fi
 
-# Afficher les infos de la branche clonée
 RUN cd app && \
-    echo "=== Info Git ===" && \
-    git log -1 --pretty=format:"Commit: %H%nAuthor: %an%nDate: %ad%nMessage: %s%n" && \
-    echo "Branch: ${GIT_BRANCH}"
-
+    echo "=== Git Info ===" && \
+    git log -1 --pretty=format:"Commit: %H%nBranch: ${GIT_BRANCH}%n"
 
 ##############################
 # 2. Phase « builder »
-# Installer les dépendances Python
 ##############################
 
 FROM python:3.11-slim AS builder
-LABEL authors="effijeanmermoz"
-LABEL environment="prod"
+
+ARG REQUIREMENTS_PATH=requirements.txt
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Installer les dépendances système pour psycopg2
 RUN apt-get update && apt-get install -y \
     gcc \
     libpq-dev \
@@ -82,58 +77,47 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Copier requirements.txt depuis git-cloner
-COPY --from=git-cloner /tmp/app/app/requirements.txt .
+COPY --from=git-cloner /tmp/app/${REQUIREMENTS_PATH} ./requirements.txt
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
-
 
 ##############################
 # 3. Phase « runtime »
 ##############################
 
 FROM python:3.11-slim
-LABEL authors="effijeanmermoz"
-LABEL environment="prod"
 
 ARG GIT_BRANCH=main
-ARG GIT_REPO
-ARG BUILD_DATE
-ARG VCS_REF
+ARG APP_SOURCE_DIR=app
+ARG APP_ENTRYPOINT=app.main:app
+ARG WORKDIR=/app
+
 ENV APP_ENV=prod \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    GIT_BRANCH=${GIT_BRANCH}
+    GIT_BRANCH=${GIT_BRANCH} \
+    APP_ENTRYPOINT=${APP_ENTRYPOINT}
 
-# Labels pour traçabilité
-LABEL org.opencontainers.image.created="${BUILD_DATE}"
-LABEL org.opencontainers.image.revision="${VCS_REF}"
-LABEL org.opencontainers.image.source="${GIT_REPO}"
+WORKDIR ${WORKDIR}
 
-WORKDIR /app/src
-
-# Installer curl pour le healthcheck
 RUN apt-get update && apt-get install -y curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Récupérer les paquets Python depuis le builder
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copier le code source depuis git-cloner
-COPY --from=git-cloner /tmp/app/app/src /app/src
+COPY --from=git-cloner /tmp/app/${APP_SOURCE_DIR} ${WORKDIR}/${APP_SOURCE_DIR}
 
-# Créer un utilisateur non-root pour la sécurité
+# Utilisateur non-root pour la sécurité
 RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser ${WORKDIR}
 USER appuser
 
-# Exposer le port 80 (Uvicorn tournera sur 80)
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s \
     CMD curl -f http://localhost:80/health || exit 1
 
-# Production : sans --reload, avec workers multiples
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "80", "--workers", "4"]
+# Production : 4 workers
+CMD uvicorn ${APP_ENTRYPOINT} --host 0.0.0.0 --port 80 --workers 4
