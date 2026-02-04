@@ -212,6 +212,71 @@ get_current_branch() {
     git rev-parse --abbrev-ref HEAD
 }
 
+# Vérifier la divergence locale/distante et proposer une action
+check_branch_divergence() {
+    local branch="$1"
+
+    # Mettre à jour les refs distantes si possible
+    git fetch origin --quiet 2>/dev/null || true
+
+    if ! git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        return 0
+    fi
+
+    local counts
+    counts=$(git rev-list --left-right --count "$branch...origin/$branch" 2>/dev/null) || return 0
+    local ahead=$(echo "$counts" | awk '{print $1}')
+    local behind=$(echo "$counts" | awk '{print $2}')
+
+    if [[ "$ahead" -eq 0 && "$behind" -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "" >&2
+    print_warning "Divergence détectée entre ${branch} et origin/${branch}" >&2
+    print_info "Commits locaux: ${ahead} | Commits distants: ${behind}" >&2
+    echo "" >&2
+
+    if [[ "$ahead" -gt 0 && "$behind" -gt 0 ]]; then
+        echo -e "${COLOR_BOLD}Choisissez une action:${COLOR_RESET}" >&2
+        echo "  1. Rebase depuis origin (git pull --rebase)" >&2
+        echo "  2. Merge depuis origin (git pull)" >&2
+        echo "  3. Reset HARD vers origin (perd les commits locaux)" >&2
+        echo "  4. Ignorer" >&2
+        read -p "$(echo -e "${COLOR_CYAN}Votre choix: ${COLOR_RESET}")" choice
+        case "$choice" in
+            1) git pull --rebase origin "$branch" ;;
+            2) git pull origin "$branch" ;;
+            3)
+                if confirm "Confirmer le reset HARD sur origin/${branch}?" "n"; then
+                    git reset --hard "origin/$branch"
+                fi
+                ;;
+            *) ;;
+        esac
+    elif [[ "$behind" -gt 0 ]]; then
+        echo -e "${COLOR_BOLD}Votre branche est en retard:${COLOR_RESET}" >&2
+        echo "  1. Rebase depuis origin (git pull --rebase)" >&2
+        echo "  2. Merge depuis origin (git pull)" >&2
+        echo "  3. Ignorer" >&2
+        read -p "$(echo -e "${COLOR_CYAN}Votre choix: ${COLOR_RESET}")" choice
+        case "$choice" in
+            1) git pull --rebase origin "$branch" ;;
+            2) git pull origin "$branch" ;;
+            *) ;;
+        esac
+    else
+        echo -e "${COLOR_BOLD}Votre branche a des commits locaux non poussés:${COLOR_RESET}" >&2
+        echo "  1. Push vers origin" >&2
+        echo "  2. Ignorer" >&2
+        read -p "$(echo -e "${COLOR_CYAN}Votre choix: ${COLOR_RESET}")" choice
+        case "$choice" in
+            1) git push origin "$branch" ;;
+            *) ;;
+        esac
+    fi
+}
+
 # ═══════════════════════════════════════════════════════════════════════
 # NOUVELLES FONCTIONNALITÉS AVANCÉES
 # ═══════════════════════════════════════════════════════════════════════
@@ -2070,6 +2135,7 @@ ask_branch_switch() {
                 print_step "Basculement sur ${source_branch}..." >&2
                 git checkout "$source_branch" >&2
                 print_success "Maintenant sur ${source_branch}" >&2
+                check_branch_divergence "$source_branch"
                 echo "2"
                 ;;
             3)
@@ -2084,6 +2150,7 @@ ask_branch_switch() {
                     print_step "Basculement sur ${chosen_branch}..." >&2
                     if git checkout "$chosen_branch" 2>&1 >&2; then
                         print_success "Maintenant sur ${chosen_branch}" >&2
+                        check_branch_divergence "$chosen_branch"
                     else
                         print_error "Impossible de basculer sur ${chosen_branch}" >&2
                     fi
@@ -2126,6 +2193,7 @@ ask_branch_switch() {
                     print_step "Basculement sur ${chosen_branch}..." >&2
                     if git checkout "$chosen_branch" 2>&1 >&2; then
                         print_success "Maintenant sur ${chosen_branch}" >&2
+                        check_branch_divergence "$chosen_branch"
                     else
                         print_error "Impossible de basculer sur ${chosen_branch}" >&2
                     fi
