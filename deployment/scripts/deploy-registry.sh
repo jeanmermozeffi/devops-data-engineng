@@ -1679,6 +1679,11 @@ cmd_deploy() {
     export REGISTRY_URL="${REGISTRY_URL}"
     export REGISTRY_USERNAME="${REGISTRY_USERNAME}"
     export IMAGE_NAME="${IMAGE_NAME}"
+    export APP_SOURCE_DIR="${APP_SOURCE_DIR}"
+    export APP_DEST_DIR="${APP_DEST_DIR}"
+    export APP_ENTRYPOINT="${APP_ENTRYPOINT}"
+    export APP_PYTHON_PATH="${APP_PYTHON_PATH}"
+    export WORKDIR="${WORKDIR}"
 
     # Exporter le chemin du fichier .env pour docker-compose
     # Sur le serveur déployé (sans deployment/), le fichier est dans le répertoire courant
@@ -1799,6 +1804,11 @@ export_compose_vars() {
     export REGISTRY_USERNAME="${REGISTRY_USERNAME}"
     export IMAGE_NAME="${IMAGE_NAME}"
     export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export APP_SOURCE_DIR="${APP_SOURCE_DIR}"
+    export APP_DEST_DIR="${APP_DEST_DIR}"
+    export APP_ENTRYPOINT="${APP_ENTRYPOINT}"
+    export APP_PYTHON_PATH="${APP_PYTHON_PATH}"
+    export WORKDIR="${WORKDIR}"
 
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
@@ -2009,4 +2019,3 @@ case "$COMMAND" in
         exit 1
         ;;
 esac
-

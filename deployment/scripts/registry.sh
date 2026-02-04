@@ -803,17 +803,21 @@ cmd_build() {
         git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
     fi
     local app_source_dir="${APP_SOURCE_DIR:-app}"
+    local app_dest_dir="${APP_DEST_DIR:-app}"
     local requirements_path="${REQUIREMENTS_PATH:-requirements.txt}"
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
+    local app_python_path="${APP_PYTHON_PATH:-}"
     local build_args=(
         "--file" "$dockerfile"
         "--build-arg" "GIT_BRANCH=$git_branch"
         "--build-arg" "GIT_REPO=$git_repo_build"
         "--build-arg" "APP_SOURCE_DIR=$app_source_dir"
+        "--build-arg" "APP_DEST_DIR=$app_dest_dir"
         "--build-arg" "REQUIREMENTS_PATH=$requirements_path"
         "--build-arg" "APP_ENTRYPOINT=$app_entrypoint"
         "--build-arg" "WORKDIR=$workdir"
+        "--build-arg" "APP_PYTHON_PATH=$app_python_path"
         "--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         "--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
     )
@@ -1018,18 +1022,22 @@ cmd_build_push_multiarch() {
         git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
     fi
     local app_source_dir="${APP_SOURCE_DIR:-app}"
+    local app_dest_dir="${APP_DEST_DIR:-app}"
     local requirements_path="${REQUIREMENTS_PATH:-requirements.txt}"
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
+    local app_python_path="${APP_PYTHON_PATH:-}"
     local build_args=(
         "--file" "$dockerfile"
         "--platform" "linux/amd64,linux/arm64"
         "--build-arg" "GIT_BRANCH=$git_branch"
         "--build-arg" "GIT_REPO=$git_repo_build"
         "--build-arg" "APP_SOURCE_DIR=$app_source_dir"
+        "--build-arg" "APP_DEST_DIR=$app_dest_dir"
         "--build-arg" "REQUIREMENTS_PATH=$requirements_path"
         "--build-arg" "APP_ENTRYPOINT=$app_entrypoint"
         "--build-arg" "WORKDIR=$workdir"
+        "--build-arg" "APP_PYTHON_PATH=$app_python_path"
         "--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         "--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
         "--tag" "$full_image_name"

@@ -97,14 +97,17 @@ FROM python:3.11-slim
 # Arguments pour la structure du projet
 ARG GIT_BRANCH=develop
 ARG APP_SOURCE_DIR=app
+ARG APP_DEST_DIR=app
 ARG APP_ENTRYPOINT=app.main:app
 ARG WORKDIR=/app
+ARG APP_PYTHON_PATH=
 
 ENV APP_ENV=dev \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GIT_BRANCH=${GIT_BRANCH} \
-    APP_ENTRYPOINT=${APP_ENTRYPOINT}
+    APP_ENTRYPOINT=${APP_ENTRYPOINT} \
+    PYTHONPATH=${APP_PYTHON_PATH}
 
 WORKDIR ${WORKDIR}
 
@@ -116,8 +119,8 @@ RUN apt-get update && apt-get install -y curl \
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copier le code source depuis le chemin configuré
-COPY --from=git-cloner /tmp/app/${APP_SOURCE_DIR} ${WORKDIR}/${APP_SOURCE_DIR}
+# Copier le code source: source (repo) -> destination (conteneur)
+COPY --from=git-cloner /tmp/app/${APP_SOURCE_DIR} ${WORKDIR}/${APP_DEST_DIR}
 
 EXPOSE 80
 

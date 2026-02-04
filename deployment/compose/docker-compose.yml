@@ -18,10 +18,19 @@ services:
       dockerfile: deployment/docker/Dockerfile.${ENV:-dev}
       args:
         - BUILD_ENV=${ENV:-dev}
+        - REQUIREMENTS_PATH=${REQUIREMENTS_PATH:-requirements.txt}
+        - APP_SOURCE_DIR=${APP_SOURCE_DIR:-app}
+        - APP_DEST_DIR=${APP_DEST_DIR:-app}
+        - APP_ENTRYPOINT=${APP_ENTRYPOINT:-app.main:app}
+        - APP_PYTHON_PATH=${APP_PYTHON_PATH:-}
+        - WORKDIR=${WORKDIR:-/app}
     image: ${IMAGE_NAME}:${ENV}-latest
     container_name: __PROJECT_NAME__-api-__ENV__
     env_file:
       - ../.env.${ENV}
+    environment:
+      - PYTHONPATH=${APP_PYTHON_PATH:-}
+      - APP_ENTRYPOINT=${APP_ENTRYPOINT:-app.main:app}
     volumes:
       - ../.env.key:/app/.env.key:ro
       - ../.env.${ENV}.encrypted:/app/.env.${ENV}.encrypted:ro
