@@ -176,6 +176,26 @@ load_devops_config() {
                 export DOCKERFILE_DIR="$value"
                 ;;
 
+            # Configuration application (FastAPI/Python)
+            app_source_dir)
+                export APP_SOURCE_DIR="$value"
+                ;;
+            app_dest_dir)
+                export APP_DEST_DIR="$value"
+                ;;
+            requirements_path)
+                export REQUIREMENTS_PATH="$value"
+                ;;
+            app_entrypoint)
+                export APP_ENTRYPOINT="$value"
+                ;;
+            app_python_path)
+                export APP_PYTHON_PATH="$value"
+                ;;
+            workdir)
+                export WORKDIR="$value"
+                ;;
+
             # SSH (pour create-deployment-package.sh)
             ssh_host)
                 export SSH_HOST="$value"
@@ -237,6 +257,14 @@ load_devops_config() {
     # Structure du projet
     export DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-deployment}"
     export DOCKERFILE_DIR="${DOCKERFILE_DIR:-docker}"
+
+    # Configuration application (FastAPI/Python)
+    export APP_SOURCE_DIR="${APP_SOURCE_DIR:-app}"
+    export APP_DEST_DIR="${APP_DEST_DIR:-app}"
+    export REQUIREMENTS_PATH="${REQUIREMENTS_PATH:-requirements.txt}"
+    export APP_ENTRYPOINT="${APP_ENTRYPOINT:-app.main:app}"
+    export APP_PYTHON_PATH="${APP_PYTHON_PATH:-}"
+    export WORKDIR="${WORKDIR:-/app}"
 
     # SSH
     export SSH_USER="${SSH_USER:-root}"

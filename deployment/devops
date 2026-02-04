@@ -104,8 +104,10 @@ load_project_config() {
             server_deploy_path) export SERVER_DEPLOY_PATH="$value" ;;
             # Structure du projet
             app_source_dir) export APP_SOURCE_DIR="$value" ;;
+            app_dest_dir) export APP_DEST_DIR="$value" ;;
             requirements_path) export REQUIREMENTS_PATH="$value" ;;
             app_entrypoint) export APP_ENTRYPOINT="$value" ;;
+            app_python_path) export APP_PYTHON_PATH="$value" ;;
             workdir) export WORKDIR="$value" ;;
             compose_files|compose_files_registry)
                 # Ignore, sera traité séparément
@@ -138,8 +140,10 @@ load_project_config() {
 
     # Valeurs par défaut pour la structure du projet
     export APP_SOURCE_DIR="${APP_SOURCE_DIR:-app}"
+    export APP_DEST_DIR="${APP_DEST_DIR:-app}"
     export REQUIREMENTS_PATH="${REQUIREMENTS_PATH:-requirements.txt}"
     export APP_ENTRYPOINT="${APP_ENTRYPOINT:-app.main:app}"
+    export APP_PYTHON_PATH="${APP_PYTHON_PATH:-}"
     export WORKDIR="${WORKDIR:-/app}"
 
     log_success "Configuration chargée: $PROJECT_NAME"
@@ -225,33 +229,40 @@ redis_prod_port: 6380
 # Exemples de structures courantes:
 #
 #   FastAPI Standard (recommandé):
-#     app_source_dir: app
+#     app_source_dir: app          # dans le repo
+#     app_dest_dir: app            # dans le conteneur -> /app/app/
 #     requirements_path: requirements.txt
-#     app_entrypoint: app.main:app
+#     app_entrypoint: app.main:app # importe /app/app/main.py
 #
 #   FastAPI avec src/:
-#     app_source_dir: app/src
+#     app_source_dir: app/src      # dans le repo
+#     app_dest_dir: src            # dans le conteneur -> /app/src/
 #     requirements_path: app/requirements.txt
-#     app_entrypoint: src.main:app
+#     app_entrypoint: src.main:app # importe /app/src/main.py
 #
 #   Django:
 #     app_source_dir: src
+#     app_dest_dir: src
 #     requirements_path: requirements.txt
 #     app_entrypoint: config.wsgi:application
-#
-#   Node.js/Angular:
-#     app_source_dir: src
-#     requirements_path: package.json
-#     app_entrypoint: dist/main.js
 
 # Dossier contenant le code source (relatif à la racine du projet)
 app_source_dir: app
+
+# Dossier destination dans le conteneur (relatif au WORKDIR)
+# Évite les duplications de chemin comme /app/app/src/
+app_dest_dir: app
 
 # Chemin vers requirements.txt ou package.json (relatif à la racine)
 requirements_path: requirements.txt
 
 # Point d'entrée de l'application (pour uvicorn/gunicorn)
 app_entrypoint: app.main:app
+
+# PYTHONPATH additionnel (optionnel)
+# Pour les imports relatifs comme "from core import ..." depuis un sous-dossier
+# Exemple: /app/app/src si le code source est dans app/src/
+app_python_path:
 
 # Dossier de travail dans le conteneur
 workdir: /app
