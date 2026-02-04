@@ -35,7 +35,11 @@ RUN --mount=type=secret,id=github_token \
     --mount=type=secret,id=git_username \
     if [ -f /run/secrets/github_token ]; then \
         GIT_TOKEN=$(cat /run/secrets/github_token | tr -d '\n\r\t ') && \
-        REPO_PATH=$(echo ${GIT_REPO} | sed 's|https://||') && \
+        if echo "${GIT_REPO}" | grep -q "^git@"; then \
+            REPO_PATH=$(echo "${GIT_REPO}" | sed -E 's|^git@([^:]+):|\1/|'); \
+        else \
+            REPO_PATH=$(echo "${GIT_REPO}" | sed -E 's|^https?://||'); \
+        fi && \
         if echo "${GIT_REPO}" | grep -q "gitlab.com"; then \
             if [ -f /run/secrets/git_username ]; then \
                 GIT_USER=$(cat /run/secrets/git_username | tr -d '\n\r\t '); \
