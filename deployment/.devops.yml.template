@@ -53,9 +53,16 @@ image_name: my-project
 # - SSH: git@github.com:username/repo.git
 git_repo: https://github.com/your-org/my-project.git
 
-# Token GitHub (optionnel, pour les repos privés)
-# Pour générer un token: https://github.com/settings/tokens
-# Permissions requises: repo
+# Username Git (optionnel, pour GitLab principalement)
+# Pour GitHub: non nécessaire (utilise oauth2)
+# Pour GitLab: votre nom d'utilisateur GitLab
+git_username:
+
+# Token GitHub/GitLab (optionnel, pour les repos privés)
+# GitHub: https://github.com/settings/tokens (permission: repo)
+# GitLab: https://gitlab.com/-/profile/personal_access_tokens (scopes: read_repository)
+# Format GitHub: ghp_xxxxx
+# Format GitLab: glpat-xxxxx
 github_token:
 
 # ============================================================================
@@ -166,16 +173,35 @@ server_deploy_path: /home/akiliya/apps
 #     deploy_path: /home/akiliya/apps
 
 # ============================================================================
+# CONFIGURATION POSTGRESQL
+# ============================================================================
+
+# Credentials PostgreSQL (utilisés dans docker-compose et .env)
+postgres_user: admin_myproject
+postgres_password: changeme_in_production
+postgres_db: myproject_db
+
+# Ports PostgreSQL par environnement
+postgres_dev_port: 5435
+postgres_staging_port: 5436
+postgres_prod_port: 5432
+
+# ============================================================================
+# CONFIGURATION ELASTICSEARCH
+# ============================================================================
+
+# Ports Elasticsearch par environnement
+elasticsearch_dev_port: 9200
+elasticsearch_staging_port: 9201
+elasticsearch_prod_port: 9202
+
+# ============================================================================
 # VARIABLES PERSONNALISÉES (optionnel)
 # ============================================================================
 
 # Ajoutez vos propres variables ici
 # Elles seront automatiquement exportées et disponibles dans docker-compose
 # Exemple:
-# postgres_user: myuser
-# postgres_password: mypassword
-# postgres_db: mydb
-# postgres_dev_port: 5432
 # rabbitmq_port: 5672
 # mongodb_port: 27017
 

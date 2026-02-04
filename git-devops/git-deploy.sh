@@ -37,8 +37,13 @@ BRANCH_STAGING="staging"
 BRANCH_MAIN="main"
 BRANCH_PROD="prod"
 
-# Préfixe pour les branches de feature
+# Préfixes pour les branches de feature (supportés)
 FEATURE_PREFIX="feature/"
+# Patterns additionnels reconnus comme branches de travail:
+# - feature/xxx, feat/xxx
+# - BE-xxx, FEAT-xxx, FIX-xxx, BUG-xxx (style Jira/ticket)
+# - issue-xxx, bugfix/xxx, hotfix/xxx
+FEATURE_PATTERNS="^(feature/|feat/|BE-|FEAT-|FIX-|BUG-|ISSUE-|issue-|bugfix/|fix/)"
 
 # Couleurs pour l'affichage
 COLOR_RESET="\033[0m"
@@ -98,6 +103,53 @@ confirm() {
         return 0
     else
         return 1
+    fi
+}
+
+# Vérifie si une branche est une branche de travail (feature/fix/etc.)
+is_work_branch() {
+    local branch="$1"
+
+    # Branches principales à exclure
+    local main_branches="^(main|master|dev|develop|staging|prod|production|release)$"
+
+    # Si c'est une branche principale, ce n'est pas une branche de travail
+    if [[ "$branch" =~ $main_branches ]]; then
+        return 1
+    fi
+
+    # Vérifier les patterns de feature (feature/, BE-, FEAT-, etc.)
+    if [[ "$branch" =~ $FEATURE_PATTERNS ]]; then
+        return 0
+    fi
+
+    # Considérer toute branche non-principale comme branche de travail potentielle
+    # (pour être flexible avec les conventions de nommage personnalisées)
+    return 0
+}
+
+# Obtenir le type de branche pour l'affichage
+get_branch_type() {
+    local branch="$1"
+
+    if [[ "$branch" =~ ^feature/ ]]; then
+        echo "feature"
+    elif [[ "$branch" =~ ^(BE-|FEAT-|ISSUE-) ]]; then
+        echo "ticket"
+    elif [[ "$branch" =~ ^(fix/|bugfix/|FIX-|BUG-) ]]; then
+        echo "fix"
+    elif [[ "$branch" =~ ^hotfix/ ]]; then
+        echo "hotfix"
+    elif [[ "$branch" == "main" || "$branch" == "master" ]]; then
+        echo "main"
+    elif [[ "$branch" == "dev" || "$branch" == "develop" ]]; then
+        echo "dev"
+    elif [[ "$branch" == "staging" ]]; then
+        echo "staging"
+    elif [[ "$branch" == "prod" || "$branch" == "production" ]]; then
+        echo "prod"
+    else
+        echo "work"
     fi
 }
 
@@ -776,17 +828,20 @@ create_feature_branch() {
 }
 
 merge_feature_to_dev() {
-    print_header "🔀 MERGER FEATURE → DEV"
+    print_header "🔀 MERGER FEATURE/WORK BRANCH → DEV"
 
     local current_branch=$(get_current_branch)
+    local branch_type=$(get_branch_type "$current_branch")
 
-    # Vérifier qu'on est sur une feature branch
-    if [[ ! "$current_branch" =~ ^${FEATURE_PREFIX} ]]; then
-        print_error "Vous devez être sur une feature branch"
+    # Vérifier qu'on n'est pas sur une branche principale
+    if [[ "$branch_type" == "main" || "$branch_type" == "dev" || "$branch_type" == "staging" || "$branch_type" == "prod" ]]; then
+        print_error "Vous devez être sur une branche de travail (feature, fix, ticket, etc.)"
+        print_info "Branche actuelle: ${current_branch} (type: ${branch_type})"
+        print_info "Branches reconnues: feature/*, BE-*, FEAT-*, FIX-*, bugfix/*, etc."
         return
     fi
 
-    print_info "Feature branch: ${current_branch}"
+    print_info "Branche de travail: ${current_branch} (type: ${branch_type})"
     echo ""
 
     # Variable pour savoir si on a rebasé
@@ -895,6 +950,203 @@ merge_feature_to_dev() {
         fi
     else
         print_error "Échec du merge. Résolvez les conflits manuellement"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# MERGE FLEXIBLE (SOURCE → CIBLE)
+# ═══════════════════════════════════════════════════════════════════════
+
+merge_branches_flexible() {
+    print_header "🔀 MERGE FLEXIBLE (SOURCE → CIBLE)"
+
+    local current_branch=$(get_current_branch)
+
+    # Récupérer toutes les branches (locales et distantes)
+    git fetch origin --prune 2>/dev/null
+
+    # Lister les branches disponibles
+    echo -e "${COLOR_BOLD}Branches disponibles:${COLOR_RESET}"
+    echo ""
+
+    # Branches locales
+    local local_branches=$(git branch --list | sed 's/^[* ]*//' | sort -u)
+    # Branches distantes (sans le préfixe origin/)
+    local remote_branches=$(git branch -r | grep "origin/" | grep -v "HEAD" | sed 's/.*origin\///' | sort -u)
+    # Fusionner et dédupliquer
+    local all_branches=$(echo -e "${local_branches}\n${remote_branches}" | sort -u | grep -v "^$")
+
+    local i=1
+    local branches_array=()
+    while IFS= read -r branch; do
+        if [[ -n "$branch" ]]; then
+            branches_array+=("$branch")
+            local marker=""
+            [[ "$branch" == "$current_branch" ]] && marker=" ${COLOR_GREEN}(actuelle)${COLOR_RESET}"
+            echo -e "  ${i}) ${branch}${marker}"
+            ((i++))
+        fi
+    done <<< "$all_branches"
+
+    echo ""
+    echo -e "${COLOR_YELLOW}TIP: Utilisez les numéros ou tapez le nom de la branche${COLOR_RESET}"
+    echo ""
+
+    # Sélection de la branche SOURCE
+    echo -e "${COLOR_BOLD}BRANCHE SOURCE (à merger):${COLOR_RESET}"
+    read -p "Choix (ou Entrée pour '$current_branch'): " source_choice
+
+    local source_branch
+    if [[ -z "$source_choice" ]]; then
+        source_branch="$current_branch"
+    elif [[ "$source_choice" =~ ^[0-9]+$ ]]; then
+        local idx=$((source_choice - 1))
+        if [[ $idx -ge 0 && $idx -lt ${#branches_array[@]} ]]; then
+            source_branch="${branches_array[$idx]}"
+        else
+            print_error "Numéro invalide"
+            return 1
+        fi
+    else
+        source_branch="$source_choice"
+    fi
+
+    # Vérifier que la branche source existe
+    if ! git show-ref --verify --quiet "refs/heads/$source_branch" && \
+       ! git show-ref --verify --quiet "refs/remotes/origin/$source_branch"; then
+        print_error "Branche '$source_branch' introuvable"
+        return 1
+    fi
+
+    echo ""
+    print_info "Source: ${source_branch}"
+    echo ""
+
+    # Sélection de la branche CIBLE
+    echo -e "${COLOR_BOLD}BRANCHE CIBLE (où merger):${COLOR_RESET}"
+    echo -e "  Branches communes: ${BRANCH_DEV}, ${BRANCH_STAGING}, ${BRANCH_MAIN}"
+    read -p "Choix: " target_choice
+
+    local target_branch
+    if [[ "$target_choice" =~ ^[0-9]+$ ]]; then
+        local idx=$((target_choice - 1))
+        if [[ $idx -ge 0 && $idx -lt ${#branches_array[@]} ]]; then
+            target_branch="${branches_array[$idx]}"
+        else
+            print_error "Numéro invalide"
+            return 1
+        fi
+    else
+        target_branch="$target_choice"
+    fi
+
+    # Vérifier que la branche cible existe
+    if [[ -z "$target_branch" ]]; then
+        print_error "Vous devez spécifier une branche cible"
+        return 1
+    fi
+
+    if ! git show-ref --verify --quiet "refs/heads/$target_branch" && \
+       ! git show-ref --verify --quiet "refs/remotes/origin/$target_branch"; then
+        print_error "Branche '$target_branch' introuvable"
+        return 1
+    fi
+
+    # Vérifier que source != cible
+    if [[ "$source_branch" == "$target_branch" ]]; then
+        print_error "Les branches source et cible doivent être différentes"
+        return 1
+    fi
+
+    echo ""
+    print_info "Cible: ${target_branch}"
+    echo ""
+
+    # Résumé et confirmation
+    echo -e "${COLOR_BOLD}═══════════════════════════════════════════════════════════════════════${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}RÉSUMÉ DU MERGE:${COLOR_RESET}"
+    echo -e "  Source: ${COLOR_CYAN}${source_branch}${COLOR_RESET}"
+    echo -e "  Cible:  ${COLOR_CYAN}${target_branch}${COLOR_RESET}"
+    echo -e "${COLOR_BOLD}═══════════════════════════════════════════════════════════════════════${COLOR_RESET}"
+    echo ""
+
+    # Afficher les commits qui seront mergés
+    print_info "Commits à merger:"
+    if git log "${target_branch}..${source_branch}" --oneline 2>/dev/null | head -10; then
+        local commit_count=$(git log "${target_branch}..${source_branch}" --oneline 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$commit_count" -gt 10 ]]; then
+            echo "  ... et $((commit_count - 10)) autres commits"
+        fi
+        if [[ "$commit_count" -eq 0 ]]; then
+            print_warning "Aucun commit à merger - les branches semblent déjà synchronisées"
+            return 0
+        fi
+    else
+        print_warning "Impossible de déterminer les commits (les branches ont peut-être divergé)"
+    fi
+    echo ""
+
+    if ! confirm "Procéder au merge?" "y"; then
+        print_info "Merge annulé"
+        return 0
+    fi
+
+    # Exécuter le merge
+    echo ""
+    print_step "Basculement sur ${target_branch}..."
+
+    # S'assurer que la branche cible existe localement
+    if ! git show-ref --verify --quiet "refs/heads/$target_branch"; then
+        git checkout -b "$target_branch" "origin/$target_branch" || {
+            print_error "Impossible de créer la branche locale $target_branch"
+            return 1
+        }
+    else
+        git checkout "$target_branch" || {
+            print_error "Impossible de basculer sur $target_branch"
+            return 1
+        }
+    fi
+
+    print_step "Mise à jour de ${target_branch}..."
+    git pull origin "$target_branch" 2>/dev/null || true
+
+    print_step "Merge de ${source_branch} dans ${target_branch}..."
+    if git merge --no-ff "$source_branch" -m "Merge ${source_branch} into ${target_branch}"; then
+        print_success "Merge réussi!"
+
+        # Proposer de pousser
+        if confirm "Pousser ${target_branch} vers origin?" "y"; then
+            git push origin "$target_branch"
+            print_success "Changements poussés sur origin/${target_branch}"
+        fi
+
+        # Proposer de supprimer la branche source si c'est une branche de travail
+        local source_type=$(get_branch_type "$source_branch")
+        if [[ "$source_type" != "main" && "$source_type" != "dev" && "$source_type" != "staging" && "$source_type" != "prod" ]]; then
+            echo ""
+            if confirm "Supprimer la branche ${source_branch}?" "n"; then
+                git branch -d "$source_branch" 2>/dev/null && print_success "Branche locale supprimée"
+
+                if confirm "Supprimer aussi sur origin?" "n"; then
+                    git push origin --delete "$source_branch" 2>/dev/null && print_success "Branche distante supprimée"
+                fi
+            fi
+        fi
+
+        # Demander où aller
+        echo ""
+        local choice=$(ask_branch_switch "$source_branch" "$target_branch")
+
+    else
+        print_error "Échec du merge"
+        print_info "Résolvez les conflits avec:"
+        echo "  git status              # Voir les fichiers en conflit"
+        echo "  # Résoudre les conflits manuellement"
+        echo "  git add <fichiers>      # Marquer comme résolus"
+        echo "  git commit              # Finaliser le merge"
+        echo ""
+        echo "  Ou annuler avec: git merge --abort"
     fi
 }
 
@@ -2154,45 +2406,46 @@ show_menu() {
 
     echo -e "${COLOR_BOLD}DÉVELOPPEMENT:${COLOR_RESET}"
     echo "  1. 🌟 Créer une nouvelle feature branch"
-    echo "  2. 🔀 Merger feature → ${BRANCH_DEV}"
+    echo "  2. 🔀 Merger branche de travail → ${BRANCH_DEV}"
+    echo "  3. 🔄 Merge flexible (source → cible au choix)"
     echo ""
 
     echo -e "${COLOR_BOLD}OPÉRATIONS GIT BASIQUES:${COLOR_RESET}"
-    echo "  3. ➕ Add - Ajouter des fichiers"
-    echo "  4. 💾 Commit - Créer un commit"
-    echo "  5. ⬆️  Push - Pousser les changements"
-    echo "  6. ⬇️  Pull - Récupérer les changements"
-    echo "  7. 🔀 Changer de branche"
+    echo "  4. ➕ Add - Ajouter des fichiers"
+    echo "  5. 💾 Commit - Créer un commit"
+    echo "  6. ⬆️  Push - Pousser les changements"
+    echo "  7. ⬇️  Pull - Récupérer les changements"
+    echo "  8. 🔀 Changer de branche"
     echo ""
 
     echo -e "${COLOR_BOLD}OPÉRATIONS AVANCÉES:${COLOR_RESET}"
-    echo "  8. ↩️  Annuler un commit"
-    echo "  9. ⏮️  Revenir à un commit spécifique"
-    echo " 10. 🚫 Annuler le suivi d'un fichier"
-    echo " 11. 📜 Voir l'historique (log)"
-    echo " 12. 💼 Stash - Sauvegarder temporairement"
-    echo " 13. 🗑️  Annuler les modifications"
-    echo " 14. 🗑️  Supprimer une branche"
+    echo "  9. ↩️  Annuler un commit"
+    echo " 10. ⏮️  Revenir à un commit spécifique"
+    echo " 11. 🚫 Annuler le suivi d'un fichier"
+    echo " 12. 📜 Voir l'historique (log)"
+    echo " 13. 💼 Stash - Sauvegarder temporairement"
+    echo " 14. 🗑️  Annuler les modifications"
+    echo " 15. 🗑️  Supprimer une branche"
     echo ""
 
     echo -e "${COLOR_BOLD}PROMOTION:${COLOR_RESET}"
-    echo " 15. ⬆️  Promouvoir ${BRANCH_DEV} → ${BRANCH_STAGING}"
-    echo " 16. 🎯 Promouvoir ${BRANCH_STAGING} → ${BRANCH_MAIN} (release)"
-    echo " 17. 🚀 Déployer ${BRANCH_MAIN} → ${BRANCH_PROD}"
+    echo " 16. ⬆️  Promouvoir ${BRANCH_DEV} → ${BRANCH_STAGING}"
+    echo " 17. 🎯 Promouvoir ${BRANCH_STAGING} → ${BRANCH_MAIN} (release)"
+    echo " 18. 🚀 Déployer ${BRANCH_MAIN} → ${BRANCH_PROD}"
     echo ""
 
     echo -e "${COLOR_BOLD}GESTION & TAGS:${COLOR_RESET}"
-    echo " 18. 🏷️  Créer un tag de version"
-    echo " 19. 📋 Lister les tags"
-    echo " 20. 🔄 Synchroniser la branche actuelle"
+    echo " 19. 🏷️  Créer un tag de version"
+    echo " 20. 📋 Lister les tags"
+    echo " 21. 🔄 Synchroniser la branche actuelle"
     echo ""
 
     echo -e "${COLOR_BOLD}INFORMATIONS:${COLOR_RESET}"
-    echo " 21. 📊 Afficher le statut Git complet"
-    echo " 22. 🌳 État des branches principales"
+    echo " 22. 📊 Afficher le statut Git complet"
+    echo " 23. 🌳 État des branches principales"
     echo ""
 
-    echo " 23. ❓ Aide"
+    echo " 24. ❓ Aide"
     echo "  0. ❌ Quitter"
     echo ""
 }
@@ -2201,7 +2454,7 @@ interactive_mode() {
     while true; do
         show_menu
 
-        read -p "$(echo -e "${COLOR_CYAN}Choisissez une option (0-23): ${COLOR_RESET}")" choice
+        read -p "$(echo -e "${COLOR_CYAN}Choisissez une option (0-24): ${COLOR_RESET}")" choice
 
         case $choice in
             1)
@@ -2211,66 +2464,69 @@ interactive_mode() {
                 merge_feature_to_dev
                 ;;
             3)
-                git_add
+                merge_branches_flexible
                 ;;
             4)
-                git_commit
+                git_add
                 ;;
             5)
-                git_push
+                git_commit
                 ;;
             6)
-                git_pull
+                git_push
                 ;;
             7)
-                switch_branch
+                git_pull
                 ;;
             8)
-                undo_commit
+                switch_branch
                 ;;
             9)
-                reset_to_commit
+                undo_commit
                 ;;
             10)
-                untrack_file
+                reset_to_commit
                 ;;
             11)
-                show_log
+                untrack_file
                 ;;
             12)
-                stash_changes
+                show_log
                 ;;
             13)
-                discard_changes
+                stash_changes
                 ;;
             14)
-                delete_branch
+                discard_changes
                 ;;
             15)
-                promote_dev_to_staging
+                delete_branch
                 ;;
             16)
-                promote_staging_to_main
+                promote_dev_to_staging
                 ;;
             17)
-                deploy_main_to_prod
+                promote_staging_to_main
                 ;;
             18)
-                create_version_tag
+                deploy_main_to_prod
                 ;;
             19)
-                list_tags
+                create_version_tag
                 ;;
             20)
-                sync_branch
+                list_tags
                 ;;
             21)
-                show_status
+                sync_branch
                 ;;
             22)
-                show_branches_status
+                show_status
                 ;;
             23)
+                show_branches_status
+                ;;
+            24)
                 show_help
                 ;;
             0)

@@ -1,49 +1,27 @@
+# ============================================================================
+# Docker Compose - Development Overrides (Build Local)
+# ============================================================================
+#
+# USAGE:
+#   ENV=dev docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# ============================================================================
+
 services:
-    api-dev:
+    __PROJECT_NAME__-api-__ENV__:
         build:
-            context: ../..
-            dockerfile: ../docker/Dockerfile.dev
-        image: ${IMAGE_NAME:-api}:dev-latest
-        container_name: ${PROJECT_NAME:-app}-api-dev
+            args:
+                - ENABLE_RELOAD=true
         ports:
             - "${DEV_PORT:-8001}:80"
-        env_file:
-            - .env.dev
-        volumes:
-            # Monter la clé de chiffrement et le fichier chiffré pour le mode sécurisé
-            - ../.env.key:/app/.env.key:ro
-            - ../.env.dev.encrypted:/app/.env.dev.encrypted:ro
-        depends_on:
-            - redis-dev
-        networks:
-            - dev-network
-        restart: always
+        environment:
+            - ENVIRONMENT=dev
+            - LOG_LEVEL=DEBUG
+            - RELOAD=true
+        # La commande uvicorn est définie dans le Dockerfile avec APP_ENTRYPOINT
         labels:
-            - "environment=dev"
-            - "project=${PROJECT_NAME:-app}"
-        # Note: Code embarqué dans l'image lors du build
-        # Pour mettre à jour le code, redéployer avec: devops deploy dev
+            - "traefik.enable=false"
 
-    redis-dev:
-        image: redis:7-alpine
-        container_name: ${PROJECT_NAME:-app}-redis-dev
+    __PROJECT_NAME__-redis-__ENV__:
         ports:
             - "${REDIS_DEV_PORT:-6379}:6379"
-        volumes:
-            - redis-dev-data:/data
-        networks:
-            - dev-network
-        restart: unless-stopped
-        labels:
-            - "environment=dev"
-            - "project=${PROJECT_NAME:-app}"
-
-networks:
-    dev-network:
-        name: ${PROJECT_NAME:-app}-dev-network
-        driver: bridge
-
-volumes:
-    redis-dev-data:
-        driver: local
-        name: ${PROJECT_NAME:-app}-redis-dev-data

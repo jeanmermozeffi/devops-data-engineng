@@ -1,52 +1,40 @@
+# ============================================================================
+# Docker Compose - Staging Overrides (Build Local)
+# ============================================================================
+#
+# USAGE:
+#   ENV=staging docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# ============================================================================
+
 services:
-    api-staging:
-        build:
-            context: ../..
-            dockerfile: ../docker/Dockerfile.staging
-        image: ${IMAGE_NAME:-api}:staging-latest
-        container_name: ${PROJECT_NAME:-app}-api-staging
+    __PROJECT_NAME__-api-__ENV__:
         ports:
             - "${STAGING_PORT:-8002}:80"
-        env_file:
-            - .env.staging
-        volumes:
-            # Monter la clé de chiffrement et le fichier chiffré
-            - ../.env.key:/app/.env.key:ro
-            - ../.env.staging.encrypted:/app/.env.staging.encrypted:ro
-        depends_on:
-            - redis-staging
-        networks:
-            - staging-network
-        restart: always
+        environment:
+            - ENVIRONMENT=staging
+            - LOG_LEVEL=INFO
+            - WORKERS=2
+        # La commande uvicorn est définie dans le Dockerfile avec APP_ENTRYPOINT
+        deploy:
+            resources:
+                limits:
+                    cpus: '1.0'
+                    memory: 1G
+                reservations:
+                    cpus: '0.5'
+                    memory: 512M
         labels:
-            - "environment=staging"
-            - "project=${PROJECT_NAME:-app}"
-        # Pas de volume mount en staging pour éviter les modifications accidentelles
-        # Le code est embarqué dans l'image lors du build
+            - "traefik.enable=true"
+            - "traefik.http.routers.${PROJECT_NAME}-api-staging.rule=Host(`${STAGING_DOMAIN:-api.staging.localhost}`)"
+            - "traefik.http.services.${PROJECT_NAME}-api-staging.loadbalancer.server.port=80"
 
-    redis-staging:
-        image: redis:7-alpine
-        container_name: ${PROJECT_NAME:-app}-redis-staging
+    __PROJECT_NAME__-redis-__ENV__:
         ports:
             - "${REDIS_STAGING_PORT:-6381}:6379"
-        volumes:
-            - redis-staging-data:/data
-            - ../.docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-        networks:
-            - staging-network
-        restart: unless-stopped
-        command: redis-server /usr/local/etc/redis/redis.conf
-        labels:
-            - "environment=staging"
-            - "project=${PROJECT_NAME:-app}"
-
-networks:
-    staging-network:
-        name: ${PROJECT_NAME:-app}-staging-network
-        driver: bridge
-
-volumes:
-    redis-staging-data:
-        driver: local
-        name: ${PROJECT_NAME:-app}-redis-staging-data
+        deploy:
+            resources:
+                limits:
+                    cpus: '0.5'
+                    memory: 512M
 

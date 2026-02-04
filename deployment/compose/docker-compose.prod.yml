@@ -1,51 +1,43 @@
+# ============================================================================
+# Docker Compose - Production Overrides (Build Local)
+# ============================================================================
+#
+# USAGE:
+#   ENV=prod docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# ============================================================================
+
 services:
-    api-prod:
-        build:
-            context: ../..
-            dockerfile: ../docker/Dockerfile.prod
-        image: ${IMAGE_NAME:-api}:prod-latest
-        container_name: ${PROJECT_NAME:-app}-api-prod
+    __PROJECT_NAME__-api-__ENV__:
         ports:
             - "${PROD_PORT:-8000}:80"
-        env_file:
-            - .env.prod
-        volumes:
-            # Monter la clé de chiffrement et le fichier chiffré
-            - ../.env.key:/app/.env.key:ro
-            - ../.env.prod.encrypted:/app/.env.prod.encrypted:ro
-        depends_on:
-            - redis-prod
-        networks:
-            - prod-network
-        restart: always
+        environment:
+            - ENVIRONMENT=prod
+            - LOG_LEVEL=INFO
+            - WORKERS=4
+        # La commande uvicorn est définie dans le Dockerfile avec APP_ENTRYPOINT
+        deploy:
+            resources:
+                limits:
+                    cpus: '2.0'
+                    memory: 2G
+                reservations:
+                    cpus: '1.0'
+                    memory: 1G
         labels:
-            - "environment=prod"
-            - "project=${PROJECT_NAME:-app}"
-        # Pas de volume mount en production pour éviter les modifications accidentelles
-        # Le code est embarqué dans l'image lors du build
+            - "traefik.enable=true"
+            - "traefik.http.routers.${PROJECT_NAME}-api-prod.rule=Host(`${PROD_DOMAIN:-api.localhost}`)"
+            - "traefik.http.services.${PROJECT_NAME}-api-prod.loadbalancer.server.port=80"
+            - "traefik.http.routers.${PROJECT_NAME}-api-prod.tls=true"
+            - "traefik.http.routers.${PROJECT_NAME}-api-prod.tls.certresolver=letsencrypt"
 
-    redis-prod:
-        image: redis:7-alpine
-        container_name: ${PROJECT_NAME:-app}-redis-prod
-        ports:
-            - "${REDIS_PROD_PORT:-6380}:6379"
-        volumes:
-            - redis-prod-data:/data
-            - ../.docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
-        networks:
-            - prod-network
-        restart: unless-stopped
-        command: redis-server /usr/local/etc/redis/redis.conf
-        labels:
-            - "environment=prod"
-            - "project=${PROJECT_NAME:-app}"
-
-networks:
-    prod-network:
-        name: ${PROJECT_NAME:-app}-prod-network
-        driver: bridge
-
-volumes:
-    redis-prod-data:
-        driver: local
-        name: ${PROJECT_NAME:-app}-redis-prod-data
+    __PROJECT_NAME__-redis-__ENV__:
+        # Pas de port exposé en production (sécurité)
+        deploy:
+            resources:
+                limits:
+                    cpus: '0.5'
+                    memory: 512M
+                reservations:
+                    cpus: '0.25'
+                    memory: 256M
