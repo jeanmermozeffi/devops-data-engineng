@@ -99,6 +99,9 @@ load_devops_config() {
             image_name)
                 export IMAGE_NAME="$value"
                 ;;
+            registry_token)
+                export REGISTRY_TOKEN="$value"
+                ;;
             registry_type)
                 export REGISTRY_TYPE="$value"
                 ;;

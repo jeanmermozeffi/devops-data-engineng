@@ -30,6 +30,7 @@ dockerfile_dir: docker
 
 # Nom d'utilisateur du registry Docker (Docker Hub, GitLab, etc.)
 registry_username: your-dockerhub-username
+registry_token: YOUR_DOCKERHUB_PAT
 
 # URL du registry
 # - Docker Hub: docker.io

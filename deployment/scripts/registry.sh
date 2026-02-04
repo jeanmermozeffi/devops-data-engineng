@@ -78,9 +78,9 @@ mkdir -p "$PROFILES_DIR"
 # Variables globales pour la configuration actuelle
 # Ces variables peuvent être surchargées par les profils ou .devops.yml
 # REGISTRY_URL, REGISTRY_USERNAME, IMAGE_NAME, etc. sont chargés par config-loader.sh
-REGISTRY_PASSWORD=""
-REGISTRY_TOKEN=""
-CURRENT_PROFILE=""
+REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-}"
+REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
+CURRENT_PROFILE="${CURRENT_PROFILE:-}"
 
 # Utiliser les valeurs depuis .devops.yml si disponibles
 # Sinon, utiliser des valeurs par défaut vides (compatibilité)
@@ -462,6 +462,13 @@ load_config() {
         fi
     fi
 
+    # Fallback: utiliser la configuration projet (.devops.yml)
+    if [ -n "$REGISTRY_USERNAME" ] && [ -n "$IMAGE_NAME" ]; then
+        CURRENT_PROFILE="devops-yml"
+        REGISTRY_TYPE="${REGISTRY_TYPE:-dockerhub}"
+        return 0
+    fi
+
     # Aucune configuration trouvée
     return 1
 }
@@ -790,10 +797,23 @@ cmd_build() {
     fi
 
     # Arguments de build
+    # Normaliser GIT_REPO pour éviter les formats SSH dans le Dockerfile (git@host:org/repo.git)
+    local git_repo_build="$GIT_REPO"
+    if echo "$git_repo_build" | grep -q "^git@"; then
+        git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
+    fi
+    local app_source_dir="${APP_SOURCE_DIR:-app}"
+    local requirements_path="${REQUIREMENTS_PATH:-requirements.txt}"
+    local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
+    local workdir="${WORKDIR:-/app}"
     local build_args=(
         "--file" "$dockerfile"
         "--build-arg" "GIT_BRANCH=$git_branch"
-        "--build-arg" "GIT_REPO=$GIT_REPO"
+        "--build-arg" "GIT_REPO=$git_repo_build"
+        "--build-arg" "APP_SOURCE_DIR=$app_source_dir"
+        "--build-arg" "REQUIREMENTS_PATH=$requirements_path"
+        "--build-arg" "APP_ENTRYPOINT=$app_entrypoint"
+        "--build-arg" "WORKDIR=$workdir"
         "--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         "--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
     )
@@ -993,11 +1013,23 @@ cmd_build_push_multiarch() {
     fi
 
     # Arguments de build
+    local git_repo_build="$GIT_REPO"
+    if echo "$git_repo_build" | grep -q "^git@"; then
+        git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
+    fi
+    local app_source_dir="${APP_SOURCE_DIR:-app}"
+    local requirements_path="${REQUIREMENTS_PATH:-requirements.txt}"
+    local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
+    local workdir="${WORKDIR:-/app}"
     local build_args=(
         "--file" "$dockerfile"
         "--platform" "linux/amd64,linux/arm64"
         "--build-arg" "GIT_BRANCH=$git_branch"
-        "--build-arg" "GIT_REPO=$GIT_REPO"
+        "--build-arg" "GIT_REPO=$git_repo_build"
+        "--build-arg" "APP_SOURCE_DIR=$app_source_dir"
+        "--build-arg" "REQUIREMENTS_PATH=$requirements_path"
+        "--build-arg" "APP_ENTRYPOINT=$app_entrypoint"
+        "--build-arg" "WORKDIR=$workdir"
         "--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         "--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
         "--tag" "$full_image_name"
@@ -1307,6 +1339,11 @@ choose_environment() {
 # Vérifier qu'un profil est chargé
 ensure_profile_loaded() {
     if [ -z "$CURRENT_PROFILE" ]; then
+        if [ -n "$REGISTRY_USERNAME" ] && [ -n "$IMAGE_NAME" ]; then
+            CURRENT_PROFILE="devops-yml"
+            log_warn "Aucun profil chargé - utilisation de la configuration .devops.yml (sans credentials)"
+            return 0
+        fi
         log_error "Aucun profil chargé. Veuillez charger ou créer un profil."
         echo ""
         read -p "Appuyez sur Entrée pour continuer..."
