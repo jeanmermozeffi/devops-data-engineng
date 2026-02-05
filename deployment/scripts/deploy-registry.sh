@@ -74,8 +74,9 @@ print_separator() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Charger la configuration depuis .devops.yml (définit PROJECT_ROOT, PROJECT_NAME, etc.)
+# Ne pas échouer si le fichier n'existe pas (package minimal sur serveur)
 source "$SCRIPT_DIR/config-loader.sh"
-load_devops_config
+load_devops_config || true
 
 # Si PROJECT_ROOT n'est pas défini (ancien comportement), utiliser ../..
 if [ -z "$PROJECT_ROOT" ]; then
@@ -83,8 +84,19 @@ if [ -z "$PROJECT_ROOT" ]; then
     export PROJECT_ROOT
 fi
 
+# Fallback package minimal: si .env.registry est à la racine du script,
+# forcer PROJECT_ROOT sur ce dossier (évite /srv/home/.env.*).
+if [ -f "$SCRIPT_DIR/.env.registry" ] && [ ! -f "$PROJECT_ROOT/.env.registry" ]; then
+    PROJECT_ROOT="$SCRIPT_DIR"
+    export PROJECT_ROOT
+fi
+
 # DEPLOYMENT_DIR relatif au projet
-DEPLOYMENT_DIR="$PROJECT_ROOT/deployment"
+DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-$PROJECT_ROOT/deployment}"
+# Fallback: package minimal (fichiers à la racine)
+if [ ! -d "$DEPLOYMENT_DIR" ] && [ -f "$PROJECT_ROOT/.env.registry" ]; then
+    DEPLOYMENT_DIR="$PROJECT_ROOT"
+fi
 
 # Se placer dans le répertoire du projet
 cd "$PROJECT_ROOT"
@@ -228,6 +240,38 @@ load_profile() {
         log_warn "Utilisation du fichier legacy .env.registry" >&2
         log_info "Migrez vers les profils avec: ./scripts/registry.sh profile create" >&2
         load_credentials_from_file "$legacy_config"
+        # Sur un package minimal (sans .devops.yml), charger aussi les infos projet
+        if [ -z "$REGISTRY_URL" ]; then
+            REGISTRY_URL=$(grep "^REGISTRY_URL=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$REGISTRY_USERNAME" ]; then
+            REGISTRY_USERNAME=$(grep "^REGISTRY_USERNAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$IMAGE_NAME" ]; then
+            IMAGE_NAME=$(grep "^IMAGE_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        # Charger aussi les variables de configuration de l'application (si présentes)
+        if [ -z "$PROJECT_NAME" ]; then
+            PROJECT_NAME=$(grep "^PROJECT_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$COMPOSE_PROJECT_NAME" ]; then
+            COMPOSE_PROJECT_NAME=$(grep "^COMPOSE_PROJECT_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$APP_ENTRYPOINT" ]; then
+            APP_ENTRYPOINT=$(grep "^APP_ENTRYPOINT=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$APP_PYTHON_PATH" ]; then
+            APP_PYTHON_PATH=$(grep "^APP_PYTHON_PATH=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$APP_SOURCE_DIR" ]; then
+            APP_SOURCE_DIR=$(grep "^APP_SOURCE_DIR=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$APP_DEST_DIR" ]; then
+            APP_DEST_DIR=$(grep "^APP_DEST_DIR=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$WORKDIR" ]; then
+            WORKDIR=$(grep "^WORKDIR=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
         CURRENT_PROFILE="legacy"
         return 0
     fi
@@ -471,7 +515,20 @@ get_compose_files() {
     local env=$1
     # --env-file est nécessaire pour la substitution de variables dans le YAML
     # (env_file dans docker-compose.yml charge les variables dans le container, pas pour le parsing YAML)
-    echo "--env-file ../.env.${env} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
+
+    # Déterminer le chemin du fichier .env selon le mode de déploiement:
+    # - Mode développement (structure complète): ../..env.${env} (depuis deployment/compose/)
+    # - Mode package minimal (fichiers à la racine): ./.env.${env}
+    local env_file_path
+    if [ "$DEPLOYMENT_DIR" = "$PROJECT_ROOT" ]; then
+        # Package minimal: tous les fichiers sont à la racine
+        env_file_path="./.env.${env}"
+    else
+        # Structure complète: les docker-compose sont dans deployment/
+        env_file_path="../.env.${env}"
+    fi
+
+    echo "--env-file ${env_file_path} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
 }
 
 # ============================================================================

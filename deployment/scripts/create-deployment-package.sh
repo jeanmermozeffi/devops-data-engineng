@@ -56,7 +56,6 @@ PROJECT_DIR="${PROJECT_ROOT:-$(pwd)}"
 # Dossier packages dans devops-enginering (non versionné)
 PACKAGES_BASE_DIR="$(dirname "$SCRIPT_DIR")/../packages"
 mkdir -p "$PACKAGES_BASE_DIR"
-PACKAGE_DIR="${PACKAGE_DIR:-$PACKAGES_BASE_DIR/$(basename "$PROJECT_DIR")}"
 DEPLOYMENT_SUBDIR="${DEPLOYMENT_DIR:-deployment}"
 
 # Mapper les variables SSH depuis .devops.yml (SERVER_*) vers les variables du script (SSH_*)
@@ -67,6 +66,15 @@ SSH_PORT="${SERVER_PORT:-${SSH_PORT:-22}}"
 SSH_PATH="${SERVER_DEPLOY_PATH:-${SSH_PATH:-/srv/$(basename "$PROJECT_DIR")}}"
 SSH_USE_PASSWORD=false
 SSH_IDENTITY_FILE="${SERVER_SSH_KEY:-${SSH_IDENTITY_FILE:-}}"
+
+# Par défaut, aligner le nom du dossier de package sur le chemin de déploiement serveur
+DEFAULT_PACKAGE_NAME="$(basename "$SSH_PATH")"
+# Si server_deploy_path est défini, on force le dossier du package à ce nom
+if [ -n "$SERVER_DEPLOY_PATH" ] || [ -n "$SSH_PATH" ]; then
+    PACKAGE_DIR="$PACKAGES_BASE_DIR/$DEFAULT_PACKAGE_NAME"
+else
+    PACKAGE_DIR="${PACKAGE_DIR:-$PACKAGES_BASE_DIR/$(basename "$PROJECT_DIR")}"
+fi
 
 # Registry depuis .devops.yml (avec fallback)
 REGISTRY_TYPE="${REGISTRY_TYPE:-dockerhub}"
@@ -288,6 +296,18 @@ create_package() {
         fi
     done
 
+    # Ajuster les chemins relatifs dans les fichiers docker-compose pour le package minimal
+    # En développement, les fichiers sont dans deployment/ donc ../.env.* pointe vers la racine
+    # Dans le package minimal, tout est à la racine donc il faut ./.env.*
+    log_info "Ajustement des chemins relatifs pour le package minimal..."
+    for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
+        if [ -f "$compose_file" ]; then
+            # Remplacer ../.env. par ./.env. (chemins relatifs)
+            sed -i 's|\.\./\.env\.|./.env.|g' "$compose_file"
+        fi
+    done
+    log_success "✓ Chemins relatifs ajustés"
+
     # Copier les vrais fichiers .env depuis la racine du projet
     log_info "📋 Copie des fichiers .env réels (seront auto-chiffrés sur le serveur)..."
     echo ""
@@ -332,7 +352,7 @@ create_package() {
         fi
     fi
 
-    # Créer .env.registry avec les vraies valeurs
+    # Créer .env.registry avec les vraies valeurs (registry + app config)
     log_info "Création de .env.registry..."
     cat > "$PACKAGE_DIR/.env.registry" <<EOF
 # Configuration Docker Registry
@@ -340,6 +360,17 @@ REGISTRY_TYPE=${REGISTRY_TYPE}
 REGISTRY_URL=${REGISTRY_URL}
 REGISTRY_USERNAME=${REGISTRY_USERNAME}
 IMAGE_NAME=${IMAGE_NAME}
+
+# Configuration projet (depuis .devops.yml)
+PROJECT_NAME=${PROJECT_NAME}
+COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}
+
+# Configuration application
+APP_ENTRYPOINT=${APP_ENTRYPOINT}
+APP_PYTHON_PATH=${APP_PYTHON_PATH}
+APP_SOURCE_DIR=${APP_SOURCE_DIR}
+APP_DEST_DIR=${APP_DEST_DIR}
+WORKDIR=${WORKDIR:-/app}
 EOF
 
     log_info "🔐 Les .env seront automatiquement chiffrés sur le serveur après installation"
@@ -424,6 +455,7 @@ EOFPROFILE
     SCRIPTS_SRC_DEVOPS="$SCRIPT_DIR"
 
     SCRIPTS_TO_COPY=(
+        "config-loader.sh"
         "deploy-registry.sh"
         "diagnose-php-connection.sh"
         "fix-vps-complete.sh"
@@ -771,7 +803,9 @@ EOF
 
     cd "$PACKAGE_PARENT"
     # COPYFILE_DISABLE=1 évite les fichiers AppleDouble (._*) sur macOS
-    COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_NAME" "$PACKAGE_FOLDER/"
+    # On archive le contenu du dossier (pas le dossier lui-même) pour éviter
+    # un niveau de répertoire supplémentaire à l'extraction côté serveur.
+    COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_NAME" -C "$PACKAGE_DIR_EXPANDED" .
 
     # Statistiques
     ARCHIVE_FILE="$PACKAGE_PARENT/$ARCHIVE_NAME"
@@ -859,22 +893,23 @@ transfer_via_ssh() {
             return 1
         fi
 
-        # Décompresser sur le serveur
-        if ask_yes_no "Décompresser automatiquement sur le serveur" "y"; then
-            log_info "Extraction de l'archive sur le serveur..."
+        # Décompresser automatiquement sur le serveur (sans question)
+        log_info "Extraction de l'archive sur le serveur..."
 
-            sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
-                tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
-                rm -f ${PROJECT_NAME}.tar.gz && \
-                shopt -s dotglob && \
-                mv -f ${PROJECT_NAME}/* . 2>/dev/null || true && \
-                rmdir ${PROJECT_NAME} 2>/dev/null || true && \
-                find . -name '._*' -delete 2>/dev/null || true && \
-                chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
-                echo '✅ Extraction terminée'"
+        sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
+            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
+            rm -f ${PROJECT_NAME}.tar.gz && \
+            shopt -s dotglob && \
+            d=\$(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -n 2) && \
+            if [ \$(printf '%s\n' \"\$d\" | wc -l) -eq 1 ]; then \
+                mv -f \"\$d\"/* . 2>/dev/null || true; \
+                rmdir \"\$d\" 2>/dev/null || true; \
+            fi && \
+            find . -name '._*' -delete 2>/dev/null || true && \
+            chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
+            echo '✅ Extraction terminée'"
 
-            log_success "Package installé dans ${SSH_PATH}"
-        fi
+        log_success "Package installé dans ${SSH_PATH}"
 
     else
         # Avec clé SSH
@@ -909,23 +944,24 @@ transfer_via_ssh() {
             return 1
         fi
 
-        # Décompresser sur le serveur
-        if ask_yes_no "Décompresser automatiquement sur le serveur" "y"; then
-            log_info "Extraction de l'archive sur le serveur..."
+        # Décompresser automatiquement sur le serveur (sans question)
+        log_info "Extraction de l'archive sur le serveur..."
 
-            # Extraction simple
-            ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
-                tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
-                rm -f ${PROJECT_NAME}.tar.gz && \
-                shopt -s dotglob && \
-                mv -f ${PROJECT_NAME}/* . 2>/dev/null || true && \
-                rmdir ${PROJECT_NAME} 2>/dev/null || true && \
-                find . -name '._*' -delete 2>/dev/null || true && \
-                chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
-                echo '✅ Extraction terminée'"
+        # Extraction simple
+        ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
+            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
+            rm -f ${PROJECT_NAME}.tar.gz && \
+            shopt -s dotglob && \
+            d=\$(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -n 2) && \
+            if [ \$(printf '%s\n' \"\$d\" | wc -l) -eq 1 ]; then \
+                mv -f \"\$d\"/* . 2>/dev/null || true; \
+                rmdir \"\$d\" 2>/dev/null || true; \
+            fi && \
+            find . -name '._*' -delete 2>/dev/null || true && \
+            chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
+            echo '✅ Extraction terminée'"
 
-            log_success "Package installé dans ${SSH_PATH}"
-        fi
+        log_success "Package installé dans ${SSH_PATH}"
     fi
 
     echo ""
@@ -1093,4 +1129,3 @@ main() {
 
 # Lancer le programme
 main
-
