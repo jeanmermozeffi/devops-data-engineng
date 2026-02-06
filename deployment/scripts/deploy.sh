@@ -461,7 +461,7 @@ cmd_deploy() {
         fi
 
         log_info "Construction de l'image depuis les fichiers locaux..."
-        docker compose -f "deployment/docker-compose.$env.yml" $build_args
+        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" $build_args
 
     elif [ "$from_registry" == "true" ]; then
         log_info "Mode: Pull depuis le registry Docker"
@@ -569,7 +569,7 @@ cmd_deploy() {
             fi
 
             log_info "Construction de l'image depuis le clone temporaire..."
-            (cd "$temp_dir" && docker compose -f "deployment/docker-compose.$env.yml" $build_args)
+            (cd "$temp_dir" && docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" $build_args)
 
             # Nettoyer le clone temporaire
             log_info "Nettoyage du clone temporaire..."
@@ -593,14 +593,14 @@ cmd_deploy() {
     done
 
     # Utiliser docker compose down pour nettoyer proprement
-    docker compose -f "deployment/docker-compose.$env.yml" down 2>/dev/null || true
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down 2>/dev/null || true
 
     # Nettoyer les réseaux avec des labels incorrects
     clean_docker_networks "$env"
 
     # Démarrage
     log_info "Démarrage des conteneurs..."
-    docker compose -f "deployment/docker-compose.$env.yml" up -d
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" up -d
 
     # Attendre le démarrage
     log_info "Attente du démarrage des services..."
@@ -612,7 +612,7 @@ cmd_deploy() {
     # Afficher les logs récents
     log_info "Derniers logs:"
     print_separator
-    docker compose -f "deployment/docker-compose.$env.yml" logs --tail=20
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" logs --tail=20
     print_separator
 
     log_success "Déploiement terminé avec succès!"
@@ -624,7 +624,7 @@ cmd_start() {
     validate_env "$env"
 
     log_header "DÉMARRAGE - Environnement: $env"
-    docker compose -f "deployment/docker-compose.$env.yml" up -d
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" up -d
     log_success "Conteneurs démarrés"
     cmd_status "$env"
 }
@@ -639,7 +639,7 @@ cmd_stop() {
     fi
 
     log_header "ARRÊT - Environnement: $env"
-    docker compose -f "deployment/docker-compose.$env.yml" stop
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" stop
     log_success "Conteneurs arrêtés"
 }
 
@@ -653,9 +653,9 @@ cmd_restart() {
 
     if [ -n "$service" ]; then
         log_info "Redémarrage du service: $service"
-        docker compose -f "deployment/docker-compose.$env.yml" restart "$service"
+        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" restart "$service"
     else
-        docker compose -f "deployment/docker-compose.$env.yml" restart
+        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" restart
     fi
 
     log_success "Redémarrage terminé"
@@ -673,7 +673,7 @@ cmd_logs() {
 
     log_header "LOGS - Environnement: $env"
 
-    local log_cmd="docker compose -f docker-compose.$env.yml logs --tail=$lines"
+    local log_cmd="docker compose -f docker-compose.yml -f docker-compose.$env.yml logs --tail=$lines"
 
     if [ "$follow" == "true" ]; then
         log_cmd="$log_cmd -f"
@@ -704,7 +704,7 @@ cmd_status() {
     else
         validate_env "$env"
         log_header "STATUT - Environnement: $env"
-        docker compose -f "deployment/docker-compose.$env.yml" ps
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" ps
     fi
 
     echo ""
@@ -773,7 +773,7 @@ cmd_rebuild() {
         build_args="--no-cache"
     fi
 
-    docker compose -f "deployment/docker-compose.$env.yml" build $build_args
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" build $build_args
     log_success "Images reconstruites"
 }
 
@@ -789,7 +789,7 @@ cmd_clean() {
         confirm_action "Nettoyer l'environnement $env ?" "$env"
 
         log_info "Arrêt et suppression des conteneurs $env..."
-        docker compose -f "deployment/docker-compose.$env.yml" down -v
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down -v
     else
         confirm_action "Nettoyer TOUS les environnements ?" "prod"
 
@@ -860,7 +860,7 @@ cmd_restore() {
 
     # Arrêter Redis
     log_info "Arrêt de Redis..."
-    docker compose -f "deployment/docker-compose.$env.yml" stop redis-$env
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" stop redis
 
     # Copier le backup
     log_info "Copie du fichier de backup..."
@@ -868,7 +868,7 @@ cmd_restore() {
 
     # Redémarrer Redis
     log_info "Redémarrage de Redis..."
-    docker compose -f "deployment/docker-compose.$env.yml" start redis-$env
+    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" start redis
 
     log_success "Restauration terminée"
 }
