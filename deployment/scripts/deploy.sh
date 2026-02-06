@@ -441,6 +441,7 @@ cmd_deploy() {
     fi
 
     log_header "DÉPLOIEMENT - Environnement: $env"
+    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}-${env}"
 
     # Confirmation pour la production
     if [ "$env" == "prod" ]; then
