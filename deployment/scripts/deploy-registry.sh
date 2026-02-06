@@ -1800,6 +1800,21 @@ cmd_deploy() {
 
     cd "$DEPLOYMENT_DIR"
 
+    # Uniformiser le nom de projet Compose (local + registry)
+    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}-${env}"
+
+    # Auto-clean optionnel: arrêter un éventuel déploiement local pour éviter les conflits
+    echo ""
+    read -p "Nettoyer le déploiement local avant le deploy registry? (y/N): " clean_local
+    if [[ "$clean_local" =~ ^[Yy]$ ]]; then
+        log_info "Nettoyage du déploiement local (si présent)..."
+        docker compose -f docker-compose.yml -f docker-compose.$env.yml down -v 2>/dev/null || true
+        local network_name="${PROJECT_NAME}-${env}-network"
+        docker network rm "$network_name" 2>/dev/null || true
+    else
+        log_info "Nettoyage local ignoré"
+    fi
+
     # Arrêter les conteneurs existants
     log_info "Arrêt des conteneurs existants..."
     docker compose $(get_compose_files "$env") down || true
