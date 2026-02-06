@@ -86,6 +86,125 @@ print_step() {
     echo -e "${COLOR_BOLD}▶ $1${COLOR_RESET}"
 }
 
+# ============================================================================
+# DÉTECTION DE CONTENU SENSIBLE (AVEC ALLOWLIST)
+# ============================================================================
+
+# Fichier allowlist (relatif au repo)
+SENSITIVE_ALLOWLIST_FILE="${SENSITIVE_ALLOWLIST_FILE:-.sensitive-allowlist}"
+
+# Patterns sensibles par défaut (regex ERE)
+SENSITIVE_PATTERNS=(
+    "password[[:space:]]*=[[:space:]]*.+"
+    "token[[:space:]]*=[[:space:]]*.+"
+    "secret[[:space:]]*=[[:space:]]*.+"
+    "api[_-]?key[[:space:]]*=[[:space:]]*.+"
+    "BEGIN (RSA|OPENSSH|EC) PRIVATE KEY"
+)
+
+load_sensitive_allowlist() {
+    local repo_root
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+    local allow_file="$SENSITIVE_ALLOWLIST_FILE"
+    if [[ "$allow_file" != /* ]]; then
+        allow_file="$repo_root/$allow_file"
+    fi
+
+    ALLOWLIST_PATH_PATTERNS=()
+    ALLOWLIST_CONTENT_PATTERNS=()
+
+    if [ ! -f "$allow_file" ]; then
+        return 0
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Ignorer commentaires et lignes vides
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$line" ]] && continue
+
+        if [[ "$line" =~ ^path: ]]; then
+            ALLOWLIST_PATH_PATTERNS+=("${line#path: }")
+        elif [[ "$line" =~ ^pattern: ]]; then
+            ALLOWLIST_CONTENT_PATTERNS+=("${line#pattern: }")
+        else
+            # Par défaut, traiter comme pattern de chemin
+            ALLOWLIST_PATH_PATTERNS+=("$line")
+        fi
+    done < "$allow_file"
+}
+
+is_allowlisted_path() {
+    local file="$1"
+    local pat
+    for pat in "${ALLOWLIST_PATH_PATTERNS[@]}"; do
+        if [[ "$file" =~ $pat ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+is_allowlisted_content() {
+    local line="$1"
+    local pat
+    for pat in "${ALLOWLIST_CONTENT_PATTERNS[@]}"; do
+        if echo "$line" | grep -Eq "$pat"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_sensitive_staged() {
+    local files
+    local found=0
+
+    load_sensitive_allowlist
+
+    files=$(git diff --cached --name-only --diff-filter=ACMRT)
+    if [[ -z "$files" ]]; then
+        return 0
+    fi
+
+    for file in $files; do
+        if is_allowlisted_path "$file"; then
+            continue
+        fi
+
+        # Ignorer les fichiers binaires
+        if ! git show ":$file" | LC_ALL=C grep -Iq .; then
+            continue
+        fi
+
+        local pattern
+        for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+            local matches
+            matches=$(git show ":$file" | grep -nE "$pattern" || true)
+            if [[ -n "$matches" ]]; then
+                if [[ ${#ALLOWLIST_CONTENT_PATTERNS[@]} -gt 0 ]]; then
+                    matches=$(echo "$matches" | while IFS= read -r line; do
+                        if ! is_allowlisted_content "$line"; then
+                            echo "$line"
+                        fi
+                    done)
+                fi
+
+                if [[ -n "$matches" ]]; then
+                    print_error "Contenu sensible détecté dans: $file"
+                    print_info "Pattern: $pattern"
+                    found=1
+                fi
+            fi
+        done
+    done
+
+    if [[ "$found" -eq 1 ]]; then
+        return 1
+    fi
+    return 0
+}
+
 confirm() {
     local message="$1"
     local default="${2:-n}"
@@ -1985,6 +2104,38 @@ git_commit() {
 
 ${commit_description}"
         fi
+    fi
+
+    # Vérifier le contenu sensible avant commit
+    print_step "Vérification des fichiers sensibles..."
+    if ! check_sensitive_staged; then
+        echo ""
+        print_error "═══════════════════════════════════════════════════"
+        print_error "❌ COMMIT BLOQUÉ - FICHIERS SENSIBLES DÉTECTÉS"
+        print_error "═══════════════════════════════════════════════════"
+        echo ""
+        print_info "Actions recommandées:"
+        echo "  1. Vérifiez les fichiers listés ci-dessus"
+        echo "  2. Retirez-les du staging: git restore --staged <file>"
+        echo "  3. Ajoutez des exceptions dans .sensitive-allowlist"
+        echo "  4. Utilisez .example à la place (ex: .env.example)"
+        echo ""
+
+        if confirm "Bypasser la vérification et continuer (--no-verify)?" "n"; then
+            print_warning "Bypass activé: git commit --no-verify"
+            print_step "Création du commit..."
+            if git commit --no-verify -m "$commit_message"; then
+                print_success "Commit créé avec succès"
+                echo ""
+                print_step "Dernier commit:"
+                git log -1 --stat
+            else
+                print_error "Échec du commit"
+            fi
+        else
+            print_info "Commit annulé"
+        fi
+        return
     fi
 
     # Créer le commit
