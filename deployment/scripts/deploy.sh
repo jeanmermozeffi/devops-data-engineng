@@ -341,10 +341,27 @@ validate_env() {
 }
 
 # Obtenir le nom du conteneur
+get_container_prefix() {
+    local env=$1
+    local prefix="${PROJECT_NAME:-${COMPOSE_PROJECT_NAME}}"
+
+    if [ -z "$prefix" ]; then
+        prefix="app"
+    fi
+
+    # Si PROJECT_NAME n'est pas défini, COMPOSE_PROJECT_NAME peut inclure "-$env"
+    if [ -z "$PROJECT_NAME" ] && [ -n "$COMPOSE_PROJECT_NAME" ] && [[ "$COMPOSE_PROJECT_NAME" == *"-${env}" ]]; then
+        prefix="${COMPOSE_PROJECT_NAME%-${env}}"
+    fi
+
+    echo "$prefix"
+}
+
 get_container_name() {
     local env=$1
     local service=$2
-    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    local prefix
+    prefix="$(get_container_prefix "$env")"
     echo "${prefix}-${service}-${env}"
 }
 
@@ -378,7 +395,8 @@ confirm_action() {
 # Nettoyer les réseaux Docker avec des labels incorrects
 clean_docker_networks() {
     local env=$1
-    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    local prefix
+    prefix="$(get_container_prefix "$env")"
     local network_name="${prefix}-${env}-network"
 
     # Vérifier si le réseau existe
@@ -588,7 +606,8 @@ cmd_deploy() {
     log_info "Arrêt des anciens conteneurs..."
 
     # Arrêter les conteneurs existants (detection automatique selon le stack)
-    local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
+    local prefix
+    prefix="$(get_container_prefix "$env")"
     local containers=()
     case "${STACK_TYPE:-fastapi-redis}" in
         monitoring)
@@ -606,6 +625,8 @@ cmd_deploy() {
             log_warn "Arrêt et suppression du conteneur existant: $container"
             docker stop "$container" 2>/dev/null || true
             docker rm "$container" 2>/dev/null || true
+        else
+            log_warn "Aucun conteneur existant à supprimer: $container"
         fi
     done
 
