@@ -168,6 +168,11 @@ load_devops_config() {
                 export POSTGRES_PROD_PORT="$value"
                 ;;
 
+            # Type de stack
+            stack_type)
+                export STACK_TYPE="$value"
+                ;;
+
             # Structure du projet
             deployment_dir)
                 export DEPLOYMENT_DIR="$value"
@@ -254,6 +259,9 @@ load_devops_config() {
     export REDIS_STAGING_PORT="${REDIS_STAGING_PORT:-6381}"
     export REDIS_PROD_PORT="${REDIS_PROD_PORT:-6380}"
 
+    # Type de stack
+    export STACK_TYPE="${STACK_TYPE:-fastapi-redis}"
+
     # Structure du projet
     export DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-deployment}"
     export DOCKERFILE_DIR="${DOCKERFILE_DIR:-docker}"
@@ -331,6 +339,22 @@ get_port_for_env() {
                 staging) echo "${POSTGRES_STAGING_PORT:-5433}" ;;
                 prod) echo "${POSTGRES_PROD_PORT:-5434}" ;;
                 *) echo "5432" ;;
+            esac
+            ;;
+        prometheus)
+            case "$env" in
+                dev) echo "${PROMETHEUS_DEV_PORT:-9090}" ;;
+                staging) echo "${PROMETHEUS_STAGING_PORT:-9091}" ;;
+                prod) echo "${PROMETHEUS_PROD_PORT:-9090}" ;;
+                *) echo "9090" ;;
+            esac
+            ;;
+        grafana)
+            case "$env" in
+                dev) echo "${GRAFANA_DEV_PORT:-3000}" ;;
+                staging) echo "${GRAFANA_STAGING_PORT:-3001}" ;;
+                prod) echo "${GRAFANA_PROD_PORT:-3000}" ;;
+                *) echo "3000" ;;
             esac
             ;;
         *)

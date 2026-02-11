@@ -441,7 +441,12 @@ cmd_deploy() {
     fi
 
     log_header "DÉPLOIEMENT - Environnement: $env"
-    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}-${env}"
+    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
+    if [[ "$base_compose_name" == *"-${env}" ]]; then
+        export COMPOSE_PROJECT_NAME="$base_compose_name"
+    else
+        export COMPOSE_PROJECT_NAME="${base_compose_name}-${env}"
+    fi
 
     # Confirmation pour la production
     if [ "$env" == "prod" ]; then
@@ -582,9 +587,20 @@ cmd_deploy() {
     # Arrêt des anciens conteneurs
     log_info "Arrêt des anciens conteneurs..."
 
-    # Essayer d'arrêter les conteneurs existants (même d'autres projets)
+    # Arrêter les conteneurs existants (detection automatique selon le stack)
     local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
-    local containers=("${prefix}-api-$env" "${prefix}-redis-$env")
+    local containers=()
+    case "${STACK_TYPE:-fastapi-redis}" in
+        monitoring)
+            containers=("${prefix}-prometheus-$env" "${prefix}-grafana-$env" "${prefix}-cadvisor-$env" "${prefix}-node-exporter-$env" "${prefix}-postgres-$env" "${prefix}-postgres-exporter-$env")
+            ;;
+        fastapi-postgres-redis)
+            containers=("${prefix}-api-$env" "${prefix}-redis-$env" "${prefix}-postgres-$env")
+            ;;
+        *)
+            containers=("${prefix}-api-$env" "${prefix}-redis-$env")
+            ;;
+    esac
     for container in "${containers[@]}"; do
         if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
             log_warn "Arrêt et suppression du conteneur existant: $container"
@@ -721,23 +737,62 @@ cmd_health() {
     validate_env "$env"
 
     load_env "$env"
-    local port=$([ "$env" == "prod" ] && echo "8000" || echo "8001")
 
-    log_info "Health check de l'API (port $port)..."
+    # Adapter le health check selon le type de stack
+    case "${STACK_TYPE:-fastapi-redis}" in
+        monitoring)
+            local prom_port=$(get_port_for_env "$env" "prometheus")
+            local graf_port=$(get_port_for_env "$env" "grafana")
 
-    for i in {1..10}; do
-        if curl -sf "http://localhost:$port/health" > /dev/null; then
-            log_success "API opérationnelle sur le port $port"
-            return 0
-        else
-            if [ $i -eq 10 ]; then
-                log_error "L'API ne répond pas après 10 tentatives"
-                return 1
-            fi
-            log_warn "Tentative $i/10... (attente 3s)"
-            sleep 3
-        fi
-    done
+            log_info "Health check Prometheus (port $prom_port)..."
+            for i in {1..10}; do
+                if curl -sf "http://localhost:$prom_port/-/healthy" > /dev/null 2>&1; then
+                    log_success "Prometheus operationnel sur le port $prom_port"
+                    break
+                else
+                    if [ $i -eq 10 ]; then
+                        log_error "Prometheus ne repond pas apres 10 tentatives"
+                    else
+                        log_warn "Tentative $i/10... (attente 3s)"
+                        sleep 3
+                    fi
+                fi
+            done
+
+            log_info "Health check Grafana (port $graf_port)..."
+            for i in {1..10}; do
+                if curl -sf "http://localhost:$graf_port/api/health" > /dev/null 2>&1; then
+                    log_success "Grafana operationnel sur le port $graf_port"
+                    return 0
+                else
+                    if [ $i -eq 10 ]; then
+                        log_error "Grafana ne repond pas apres 10 tentatives"
+                        return 1
+                    fi
+                    log_warn "Tentative $i/10... (attente 3s)"
+                    sleep 3
+                fi
+            done
+            ;;
+        *)
+            local port=$(get_port_for_env "$env" "api")
+
+            log_info "Health check de l'API (port $port)..."
+            for i in {1..10}; do
+                if curl -sf "http://localhost:$port/health" > /dev/null; then
+                    log_success "API operationnelle sur le port $port"
+                    return 0
+                else
+                    if [ $i -eq 10 ]; then
+                        log_error "L'API ne repond pas apres 10 tentatives"
+                        return 1
+                    fi
+                    log_warn "Tentative $i/10... (attente 3s)"
+                    sleep 3
+                fi
+            done
+            ;;
+    esac
 }
 
 # Accéder au shell d'un conteneur

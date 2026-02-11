@@ -1,0 +1,221 @@
+================================================================================
+PROMPT : INITIALISATION DEVOPS POUR UN NOUVEAU PROJET
+================================================================================
+
+Utilise ce prompt avec Claude Code pour initialiser le systeme DevOps
+sur n'importe quel nouveau projet.
+
+Copie-colle le bloc ci-dessous dans Claude Code en remplacant les variables
+entre crochets [] par les valeurs de ton projet.
+
+================================================================================
+PROMPT A COPIER :
+================================================================================
+
+Nous avons un nouveau projet : [CHEMIN_ABSOLU_DU_PROJET]
+
+Il faut initialiser la configuration DevOps complete en se basant sur :
+- Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
+- Les fichiers Docker existants dans : [CHEMIN_ABSOLU_DU_PROJET]/docker (si existant)
+
+Voici les informations du projet :
+- Nom du projet : [NOM_DU_PROJET]
+- Type de stack : [TYPE_STACK]
+  (options: fastapi-redis, fastapi-postgres-redis, monitoring, custom)
+- Registry Docker Hub username : effijeanmermoz
+- Repo Git : [URL_GIT_REPO]
+
+Etapes a realiser :
+
+1. ANALYSER le projet :
+   - Lire la structure existante du projet
+   - Identifier les services (docker-compose existant dans docker/)
+   - Identifier les Dockerfiles existants
+   - Determiner les ports utilises
+
+2. CREER le fichier .devops.yml a la racine du projet :
+   - Se baser sur le template : devops-enginering/deployment/.devops.yml.template
+   - Adapter les variables au projet (nom, ports, services, stack_type)
+   - Configurer les ports par environnement (dev/staging/prod)
+
+3. CREER le fichier .devops.yml.example (version sans secrets) :
+   - Version publique du .devops.yml pour le versionning
+
+4. CREER le dossier deployment/ avec :
+   a) docker-compose.yml (base) :
+      - Adapter depuis le template devops-enginering ou les docker/ existants
+      - IMPORTANT : Les noms de services (cles YAML) doivent etre STATIQUES
+        (ex: prometheus, grafana, cadvisor) - PAS de variables ${} dans les cles
+      - Utiliser ${PROJECT_NAME} et ${ENV} uniquement dans les VALEURS
+        (container_name, image, labels, etc.)
+      - container_name : ${PROJECT_NAME}-{service}-${ENV}
+      - Reseaux : ${PROJECT_NAME}-${ENV}-network
+      - Volumes nommes : ${PROJECT_NAME}-{service}-${ENV}-data
+      - Labels : project, environment, service, monitoring.enabled
+      - Health checks sur chaque service
+
+   b) docker-compose.dev.yml (surcharge dev) :
+      - Ports exposes pour acces direct
+      - Logs en DEBUG
+      - Options de debug activees
+
+   c) docker-compose.staging.yml (surcharge staging) :
+      - Ports decales (+1 par rapport a dev)
+      - Logs en INFO
+      - Resource limits moderes
+
+   d) docker-compose.prod.yml (surcharge prod) :
+      - Resource limits stricts (CPU/RAM)
+      - Logs en WARN
+      - Integration Traefik (labels)
+      - Ports internes non exposes pour les services secondaires
+
+   e) docker-compose.registry.yml (base registry) :
+      - Meme structure que la base mais avec images depuis registry
+      - Format image : ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${ENV}-${IMAGE_TAG:-latest}
+      - Label : image.source=registry
+
+   f) docker-compose.{dev,staging,prod}-registry.yml :
+      - Surcharges par env pour le mode registry
+
+5. CREER les Dockerfiles dans deployment/docker/ :
+   - Dockerfile.dev, Dockerfile.staging, Dockerfile.prod
+   - Dockerfile.dev.git, Dockerfile.staging.git, Dockerfile.prod.git
+   - Adapter selon le type de stack :
+     * FastAPI : multi-stage Python build (builder + runtime)
+     * Monitoring : images officielles + custom exporters
+     * Custom : selon les besoins
+
+6. CREER les fichiers .env :
+   - .env.dev (ports, mots de passe dev)
+   - .env.staging (ports staging)
+   - .env.prod (ports prod, mots de passe forts)
+   - .env.example (template public)
+
+7. VERIFIER la coherence :
+   - Les noms de services dans compose base = compose override
+   - Les ports ne se chevauchent pas entre environnements
+   - Les volumes sont correctement nommes
+   - Les health checks sont presents
+   - Les depends_on avec condition: service_healthy sont corrects
+
+================================================================================
+TYPES DE STACK SUPPORTES :
+================================================================================
+
+1. fastapi-redis
+   Services : API (FastAPI + uvicorn) + Redis
+   Ports par defaut :
+     dev:  API=8001, Redis=6379
+     staging: API=8002, Redis=6381
+     prod: API=8000, Redis=6380
+
+2. fastapi-postgres-redis
+   Services : API + PostgreSQL + Redis
+   Ports par defaut :
+     dev:  API=8001, PG=5435, Redis=6379
+     staging: API=8002, PG=5436, Redis=6381
+     prod: API=8000, PG=5432, Redis=6380
+
+3. monitoring
+   Services : Prometheus + Grafana + cAdvisor + Node Exporter + PostgreSQL + PostgreSQL Exporter
+   Ports par defaut :
+     dev:  Prometheus=9090, Grafana=3000, cAdvisor=8080, Node=9100, PG-Exp=9187
+     staging: Prometheus=9091, Grafana=3001, cAdvisor=8081, Node=9101, PG-Exp=9188
+     prod: Prometheus=9090, Grafana=3000 (via Traefik)
+   Specifites :
+     - Pas de Dockerfile custom (images officielles)
+     - Seul le postgres-exporter a un Dockerfile custom
+     - Volumes pour prometheus configs, grafana dashboards, alert rules
+     - Retention configurable par env (15d/30d/90d)
+
+4. custom
+   Services : a definir selon le projet
+   Adapter manuellement les templates
+
+================================================================================
+CONVENTIONS DE NOMMAGE :
+================================================================================
+
+- Conteneurs   : ${PROJECT_NAME}-{service}-${ENV}
+- Reseaux      : ${PROJECT_NAME}-${ENV}-network
+- Volumes      : ${PROJECT_NAME}-{service}-${ENV}-data
+- Images       : ${IMAGE_NAME}:${ENV}-latest
+- Registry     : ${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${ENV}-${IMAGE_TAG}
+
+================================================================================
+STRUCTURE FINALE ATTENDUE :
+================================================================================
+
+mon-projet/
+├── .devops.yml                              # Config DevOps (NE PAS committer si secrets)
+├── .devops.yml.example                      # Template public
+├── .env.dev                                 # Variables dev
+├── .env.staging                             # Variables staging
+├── .env.prod                                # Variables prod
+├── .env.example                             # Template public
+├── deployment/
+│   ├── docker-compose.yml                   # Base (build local)
+│   ├── docker-compose.dev.yml               # Surcharge dev
+│   ├── docker-compose.staging.yml           # Surcharge staging
+│   ├── docker-compose.prod.yml              # Surcharge prod
+│   ├── docker-compose.registry.yml          # Base (depuis registry)
+│   ├── docker-compose.dev-registry.yml      # Surcharge dev registry
+│   ├── docker-compose.staging-registry.yml  # Surcharge staging registry
+│   ├── docker-compose.prod-registry.yml     # Surcharge prod registry
+│   └── docker/
+│       ├── Dockerfile.dev                   # Build local dev
+│       ├── Dockerfile.staging               # Build local staging
+│       ├── Dockerfile.prod                  # Build local prod
+│       ├── Dockerfile.dev.git               # Build depuis Git dev
+│       ├── Dockerfile.staging.git           # Build depuis Git staging
+│       └── Dockerfile.prod.git              # Build depuis Git prod
+└── [code source du projet]
+
+================================================================================
+COMMANDES DEVOPS DISPONIBLES APRES INIT :
+================================================================================
+
+# Deploiement local
+devops deploy dev                      # Build + deploy en dev
+devops deploy staging                  # Build + deploy en staging
+devops deploy prod                     # Build + deploy en prod
+
+# Deploiement depuis registry
+devops deploy dev --from-registry      # Pull depuis registry + deploy
+devops deploy prod --from-registry
+
+# Registry
+devops registry push dev               # Push image dev vers registry
+devops registry release                # Release (tag + push)
+
+# Package
+devops package                         # Creer un package de deploiement
+
+================================================================================
+EXEMPLE D'UTILISATION :
+================================================================================
+
+Pour un projet FastAPI + Redis nomme "mon-api" :
+
+  Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/mon-api
+  Il faut initialiser la configuration DevOps complete en se basant sur :
+  - Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
+  - Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/mon-api/docker
+  Voici les informations du projet :
+  - Nom du projet : mon-api
+  - Type de stack : fastapi-redis
+  - Registry Docker Hub username : effijeanmermoz
+  - Repo Git : https://github.com/org/mon-api.git
+
+Pour un projet Monitoring :
+
+  Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform
+  Il faut initialiser la configuration DevOps complete en se basant sur :
+  - Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
+  - Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform/docker
+  Voici les informations du projet :
+  - Nom du projet : cicbi-monitoring-platform
+  - Type de stack : monitoring
+  - Registry Docker Hub username : effijeanmermoz
+  - Repo Git : https://github.com/org/cicbi-monitoring-platform.git

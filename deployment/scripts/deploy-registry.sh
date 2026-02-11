@@ -1801,7 +1801,12 @@ cmd_deploy() {
     cd "$DEPLOYMENT_DIR"
 
     # Uniformiser le nom de projet Compose (local + registry)
-    export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}-${env}"
+    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
+    if [[ "$base_compose_name" == *"-${env}" ]]; then
+        export COMPOSE_PROJECT_NAME="$base_compose_name"
+    else
+        export COMPOSE_PROJECT_NAME="${base_compose_name}-${env}"
+    fi
 
     # Auto-clean optionnel: arrêter un éventuel déploiement local pour éviter les conflits
     echo ""
@@ -1810,7 +1815,30 @@ cmd_deploy() {
         log_info "Nettoyage du déploiement local (si présent)..."
         docker compose -f docker-compose.yml -f docker-compose.$env.yml down -v 2>/dev/null || true
         local network_name="${PROJECT_NAME}-${env}-network"
-        docker network rm "$network_name" 2>/dev/null || true
+
+        case "${STACK_TYPE}" in
+            monitoring)
+                local containers=(
+                    "${PROJECT_NAME}-prometheus-${env}"
+                    "${PROJECT_NAME}-grafana-${env}"
+                    "${PROJECT_NAME}-cadvisor-${env}"
+                    "${PROJECT_NAME}-node-exporter-${env}"
+                    "${PROJECT_NAME}-postgres-${env}"
+                    "${PROJECT_NAME}-postgres-exporter-${env}"
+                )
+                docker rm -f "${containers[@]}" 2>/dev/null || true
+                docker network rm "$network_name" 2>/dev/null || true
+                docker volume rm "${PROJECT_NAME}-prometheus-${env}-data" "${PROJECT_NAME}-grafana-${env}-data" 2>/dev/null || true
+                ;;
+            *)
+                local volume_name="${PROJECT_NAME}-redis-${env}-data"
+                local api_container="${PROJECT_NAME}-api-${env}"
+                local redis_container="${PROJECT_NAME}-redis-${env}"
+                docker rm -f "$api_container" "$redis_container" 2>/dev/null || true
+                docker network rm "$network_name" 2>/dev/null || true
+                docker volume rm "$volume_name" 2>/dev/null || true
+                ;;
+        esac
     else
         log_info "Nettoyage local ignoré"
     fi
@@ -1819,13 +1847,22 @@ cmd_deploy() {
     log_info "Arrêt des conteneurs existants..."
     docker compose $(get_compose_files "$env") down || true
 
-    # Télécharger l'image
-    log_info "Téléchargement de l'image..."
-    docker pull "$image_full"
+    # Télécharger l'image (sauf pour monitoring qui utilise des images officielles)
+    if [ "${STACK_TYPE}" = "monitoring" ]; then
+        log_info "Stack monitoring: les images officielles seront téléchargées par docker compose"
+        log_info "Le postgres-exporter sera buildé localement"
+    else
+        log_info "Téléchargement de l'image..."
+        docker pull "$image_full"
+    fi
 
     # Démarrer les services
     log_info "Démarrage des services..."
-    docker compose $(get_compose_files "$env") up -d
+    if [ "${STACK_TYPE}" = "monitoring" ]; then
+        docker compose $(get_compose_files "$env") up -d --build
+    else
+        docker compose $(get_compose_files "$env") up -d
+    fi
 
     print_separator
 
