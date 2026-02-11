@@ -306,7 +306,95 @@ create_package() {
             sed -i 's|\.\./\.env\.|./.env.|g' "$compose_file"
         fi
     done
-    log_success "✓ Chemins relatifs ajustés"
+    log_success "✓ Chemins .env ajustés"
+
+    # Détecter et copier les ressources locales référencées dans les docker-compose
+    # (build contexts, volumes montés avec chemins relatifs ../*)
+    # Ex: postgres-exporter (build), prometheus/ (config), grafana/ (dashboards)
+    log_info "Détection des ressources locales dans les docker-compose..."
+    LOCAL_RESOURCES_COPIED=0
+    # Liste des chemins déjà traités (éviter les doublons)
+    declare -A COPIED_PATHS
+
+    for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
+        [ -f "$compose_file" ] || continue
+
+        # Extraire TOUS les chemins ../* des docker-compose :
+        #   - build context:  "context: ../exporters/..."
+        #   - volume mounts:  "- ../prometheus/prometheus.yml:/etc/..."
+        #   - env_file:       "- ../.env.${ENV}" (déjà géré séparément)
+        while IFS= read -r raw_path; do
+            # Nettoyer : retirer prefixe YAML (context:, - ), suffixe (:ro, :rw, :/dest)
+            local clean_path="$raw_path"
+            clean_path=$(echo "$clean_path" | sed 's/^[[:space:]]*context:[[:space:]]*//; s/^[[:space:]]*-[[:space:]]*//; s/[[:space:]]*$//')
+            # Retirer le mapping de destination du volume (tout après le premier : sauf si c'est un chemin Windows)
+            clean_path=$(echo "$clean_path" | sed 's/^\([^:]*\):.*/\1/')
+            # Retirer quotes
+            clean_path=$(echo "$clean_path" | sed 's/^["'"'"']//; s/["'"'"']$//')
+
+            # Ignorer les chemins .env (déjà gérés), les chemins absolus, les chemins vides
+            [[ -z "$clean_path" ]] && continue
+            [[ "$clean_path" == /* ]] && continue
+            [[ "$clean_path" == *".env."* ]] && continue
+            # Ne traiter que les chemins ../
+            [[ "$clean_path" != ../* ]] && continue
+
+            # Chemin relatif dans le package (sans le ../)
+            local pkg_relative="${clean_path#../}"
+            # Pour un fichier comme ../prometheus/prometheus.yml, on copie le dossier parent
+            # Pour un dossier comme ../prometheus/rules/, on copie le dossier
+            local source_path="$PROJECT_DIR/$pkg_relative"
+
+            # Déterminer si c'est un fichier ou un dossier
+            # Retirer le trailing slash pour les dossiers
+            source_path="${source_path%/}"
+            pkg_relative="${pkg_relative%/}"
+
+            # Calculer le dossier à copier (le dossier top-level)
+            # Ex: prometheus/prometheus.yml -> on copie prometheus/
+            #     grafana/provisioning/ -> on copie grafana/
+            local top_dir=$(echo "$pkg_relative" | cut -d'/' -f1)
+
+            # Vérifier si déjà copié
+            if [ -n "${COPIED_PATHS[$top_dir]+x}" ]; then
+                continue
+            fi
+
+            local source_top="$PROJECT_DIR/$top_dir"
+            local dest_top="$PACKAGE_DIR/$top_dir"
+
+            if [ -d "$source_top" ]; then
+                cp -r "$source_top" "$dest_top"
+                log_success "✓ Dossier copié: $top_dir/"
+                COPIED_PATHS[$top_dir]=1
+                LOCAL_RESOURCES_COPIED=$((LOCAL_RESOURCES_COPIED + 1))
+            elif [ -f "$source_path" ]; then
+                mkdir -p "$(dirname "$PACKAGE_DIR/$pkg_relative")"
+                cp "$source_path" "$PACKAGE_DIR/$pkg_relative"
+                log_success "✓ Fichier copié: $pkg_relative"
+                COPIED_PATHS[$pkg_relative]=1
+                LOCAL_RESOURCES_COPIED=$((LOCAL_RESOURCES_COPIED + 1))
+            else
+                log_warn "⚠️  Ressource non trouvée: $source_path"
+            fi
+        done < <(grep -E '\.\.\/' "$compose_file" 2>/dev/null)
+    done
+
+    # Ajuster TOUS les chemins ../ dans les docker-compose
+    # En dev: ../prometheus/... (relatif à deployment/)
+    # Dans le package: ./prometheus/... (tout est à la racine)
+    log_info "Ajustement de tous les chemins relatifs ../ → ./ ..."
+    for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
+        if [ -f "$compose_file" ]; then
+            sed -i 's|\.\./|./|g' "$compose_file"
+        fi
+    done
+
+    if [ "$LOCAL_RESOURCES_COPIED" -gt 0 ]; then
+        log_success "✓ $LOCAL_RESOURCES_COPIED ressource(s) locale(s) copiée(s) et chemins ajustés"
+    else
+        log_info "Aucune ressource locale détectée (images officielles uniquement)"
+    fi
 
     # Copier les vrais fichiers .env depuis la racine du projet
     log_info "📋 Copie des fichiers .env réels (seront auto-chiffrés sur le serveur)..."
