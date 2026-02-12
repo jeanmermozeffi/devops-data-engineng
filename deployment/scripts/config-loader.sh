@@ -168,6 +168,17 @@ load_devops_config() {
                 export POSTGRES_PROD_PORT="$value"
                 ;;
 
+            # Superset ports (si présent)
+            superset_dev_port)
+                export SUPERSET_DEV_PORT="$value"
+                ;;
+            superset_staging_port)
+                export SUPERSET_STAGING_PORT="$value"
+                ;;
+            superset_prod_port)
+                export SUPERSET_PROD_PORT="$value"
+                ;;
+
             # Type de stack
             stack_type)
                 export STACK_TYPE="$value"
@@ -355,6 +366,14 @@ get_port_for_env() {
                 staging) echo "${GRAFANA_STAGING_PORT:-3001}" ;;
                 prod) echo "${GRAFANA_PROD_PORT:-3000}" ;;
                 *) echo "3000" ;;
+            esac
+            ;;
+        superset)
+            case "$env" in
+                dev) echo "${SUPERSET_DEV_PORT:-8088}" ;;
+                staging) echo "${SUPERSET_STAGING_PORT:-8089}" ;;
+                prod) echo "${SUPERSET_PROD_PORT:-8088}" ;;
+                *) echo "8088" ;;
             esac
             ;;
         *)
