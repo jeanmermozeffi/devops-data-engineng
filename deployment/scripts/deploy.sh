@@ -613,6 +613,9 @@ cmd_deploy() {
         monitoring)
             containers=("${prefix}-prometheus-$env" "${prefix}-grafana-$env" "${prefix}-cadvisor-$env" "${prefix}-node-exporter-$env" "${prefix}-postgres-$env" "${prefix}-postgres-exporter-$env")
             ;;
+        reporting-superset)
+            containers=("${prefix}-superset-$env" "${prefix}-superset-init-$env" "${prefix}-superset-worker-$env" "${prefix}-superset-beat-$env" "${prefix}-db-$env" "${prefix}-redis-$env")
+            ;;
         fastapi-postgres-redis)
             containers=("${prefix}-api-$env" "${prefix}-redis-$env" "${prefix}-postgres-$env")
             ;;
@@ -795,6 +798,24 @@ cmd_health() {
                 fi
             done
             ;;
+        reporting-superset)
+            local superset_port=$(get_port_for_env "$env" "superset")
+
+            log_info "Health check Superset (port $superset_port)..."
+            for i in {1..15}; do
+                if curl -sf "http://localhost:$superset_port/health" > /dev/null 2>&1; then
+                    log_success "Superset operationnel sur le port $superset_port"
+                    return 0
+                else
+                    if [ $i -eq 15 ]; then
+                        log_error "Superset ne repond pas apres 15 tentatives"
+                        return 1
+                    fi
+                    log_warn "Tentative $i/15... (attente 5s)"
+                    sleep 5
+                fi
+            done
+            ;;
         *)
             local port=$(get_port_for_env "$env" "api")
 
@@ -858,34 +879,48 @@ cmd_rebuild() {
 cmd_clean() {
     local env=$1
     local deep=${2:-false}
+    local project="${PROJECT_NAME:-app}"
 
-    log_header "NETTOYAGE"
+    log_header "NETTOYAGE - Projet: $project"
 
     if [ "$env" != "all" ]; then
         validate_env "$env"
-        confirm_action "Nettoyer l'environnement $env ?" "$env"
+        confirm_action "Nettoyer l'environnement $env du projet $project ?" "$env"
 
         log_info "Arrêt et suppression des conteneurs $env..."
-    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down -v
+        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down -v
     else
-        confirm_action "Nettoyer TOUS les environnements ?" "prod"
+        confirm_action "Nettoyer TOUS les environnements du projet $project ?" "prod"
 
-        log_info "Arrêt et suppression de tous les conteneurs..."
-        docker compose -f deployment/docker-compose.dev.yml down -v 2>/dev/null || true
-        docker compose -f deployment/docker-compose.prod.yml down -v 2>/dev/null || true
-        docker compose -f deployment/docker-compose.nginx.yml down -v 2>/dev/null || true
+        log_info "Arrêt et suppression de tous les conteneurs du projet..."
+        for e in dev staging prod; do
+            if [ -f "deployment/docker-compose.$e.yml" ]; then
+                log_info "Nettoyage environnement $e..."
+                docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$e.yml" down -v 2>/dev/null || true
+            fi
+        done
     fi
 
-    log_info "Suppression des images inutilisées..."
-    docker image prune -f
+    # Supprimer uniquement les images du projet (filtrées par label ou nom)
+    log_info "Suppression des images du projet $project..."
+    docker images --filter "label=project=${project}" -q 2>/dev/null | xargs -r docker rmi -f 2>/dev/null || true
+    docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' | grep -E "^${IMAGE_NAME:-$project}:" | awk '{print $2}' | xargs -r docker rmi -f 2>/dev/null || true
+
+    # Supprimer les volumes orphelins du projet
+    log_info "Suppression des volumes orphelins du projet $project..."
+    docker volume ls --filter "name=${project}" -q 2>/dev/null | xargs -r docker volume rm 2>/dev/null || true
+
+    # Supprimer les réseaux orphelins du projet
+    log_info "Suppression des réseaux orphelins du projet $project..."
+    docker network ls --filter "name=${project}" -q 2>/dev/null | xargs -r docker network rm 2>/dev/null || true
 
     if [ "$deep" == "true" ]; then
-        confirm_action "Effectuer un nettoyage complet (images, volumes, cache) ?" "prod"
-        log_warn "Nettoyage complet du système Docker..."
-        docker system prune -a -f --volumes
+        confirm_action "Supprimer aussi le cache de build Docker pour le projet $project ?" "prod"
+        log_warn "Nettoyage du cache de build..."
+        docker builder prune -f 2>/dev/null || true
     fi
 
-    log_success "Nettoyage terminé"
+    log_success "Nettoyage du projet $project terminé"
 }
 
 # Backup Redis

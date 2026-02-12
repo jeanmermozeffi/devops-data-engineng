@@ -1,35 +1,20 @@
-================================================================================
-PROMPT : INITIALISATION DEVOPS POUR UN NOUVEAU PROJET
-================================================================================
-
-Utilise ce prompt avec Claude Code pour initialiser le systeme DevOps
-sur n'importe quel nouveau projet.
-
-Copie-colle le bloc ci-dessous dans Claude Code en remplacant les variables
-entre crochets [] par les valeurs de ton projet.
-
-================================================================================
-PROMPT A COPIER :
-================================================================================
-
-Nous avons un nouveau projet : [CHEMIN_ABSOLU_DU_PROJET]
+Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/superset-bi
 
 Il faut initialiser la configuration DevOps complete en se basant sur :
 - Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
-- Les fichiers Docker existants dans : [CHEMIN_ABSOLU_DU_PROJET]/docker (si existant)
+- Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/superset-bi/
 
 Voici les informations du projet :
-- Nom du projet : [NOM_DU_PROJET]
-- Type de stack : [TYPE_STACK]
-  (options: fastapi-redis, fastapi-postgres-redis, monitoring, custom)
+- Nom du projet : superset-bi
+- Type de stack : reporting-superset
 - Registry Docker Hub username : effijeanmermoz
-- Repo Git : [URL_GIT_REPO]
+- Repo Git : https://github.com/cicbi/superset-bi.git
 
 Etapes a realiser :
 
 1. ANALYSER le projet :
    - Lire la structure existante du projet
-   - Identifier les services (docker-compose existant dans docker/)
+   - Identifier les services (docker-compose existant dans / ou docker/)
    - Identifier les Dockerfiles existants
    - Determiner les ports utilises
 
@@ -102,33 +87,6 @@ Etapes a realiser :
 ================================================================================
 TYPES DE STACK SUPPORTES :
 ================================================================================
-
-1. fastapi-redis
-   Services : API (FastAPI + uvicorn) + Redis
-   Ports par defaut :
-     dev:  API=8001, Redis=6379
-     staging: API=8002, Redis=6381
-     prod: API=8000, Redis=6380
-
-2. fastapi-postgres-redis
-   Services : API + PostgreSQL + Redis
-   Ports par defaut :
-     dev:  API=8001, PG=5435, Redis=6379
-     staging: API=8002, PG=5436, Redis=6381
-     prod: API=8000, PG=5432, Redis=6380
-
-3. monitoring
-   Services : Prometheus + Grafana + cAdvisor + Node Exporter + PostgreSQL + PostgreSQL Exporter
-   Ports par defaut :
-     dev:  Prometheus=9090, Grafana=3000, cAdvisor=8080, Node=9100, PG-Exp=9187
-     staging: Prometheus=9091, Grafana=3001, cAdvisor=8081, Node=9101, PG-Exp=9188
-     prod: Prometheus=9090, Grafana=3000 (via Traefik)
-   Specifites :
-     - Pas de Dockerfile custom (images officielles)
-     - Seul le postgres-exporter a un Dockerfile custom
-     - Volumes pour prometheus configs, grafana dashboards, alert rules
-     - Retention configurable par env (15d/30d/90d)
-
 4. custom
    Services : a definir selon le projet
    Adapter manuellement les templates
@@ -147,7 +105,7 @@ CONVENTIONS DE NOMMAGE :
 STRUCTURE FINALE ATTENDUE :
 ================================================================================
 
-mon-projet/
+superset-bi/
 ├── .devops.yml                              # Config DevOps (NE PAS committer si secrets)
 ├── .devops.yml.example                      # Template public
 ├── .env.dev                                 # Variables dev
@@ -191,31 +149,3 @@ devops registry release                # Release (tag + push)
 
 # Package
 devops package                         # Creer un package de deploiement
-
-================================================================================
-EXEMPLE D'UTILISATION :
-================================================================================
-
-Pour un projet FastAPI + Redis nomme "mon-api" :
-
-  Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/mon-api
-  Il faut initialiser la configuration DevOps complete en se basant sur :
-  - Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
-  - Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/mon-api/docker
-  Voici les informations du projet :
-  - Nom du projet : mon-api
-  - Type de stack : fastapi-redis
-  - Registry Docker Hub username : effijeanmermoz
-  - Repo Git : https://github.com/org/mon-api.git
-
-Pour un projet Monitoring :
-
-  Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform
-  Il faut initialiser la configuration DevOps complete en se basant sur :
-  - Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
-  - Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform/docker
-  Voici les informations du projet :
-  - Nom du projet : cicbi-monitoring-platform
-  - Type de stack : monitoring
-  - Registry Docker Hub username : effijeanmermoz
-  - Repo Git : https://github.com/cicbi/cicbi-monitoring-platform.git
