@@ -1739,7 +1739,13 @@ cmd_deploy() {
     # ENV est utilisé dans docker-compose.yml pour ${ENV}
     export ENV=$env
     export ENVIRONMENT=$env
-    export IMAGE_TAG=$tag
+    # docker-compose.registry.yml utilise ${ENV}-${IMAGE_TAG}
+    # Si le tag contient déjà le prefix env (ex: dev-latest), éviter dev-dev-latest
+    local image_tag_for_compose="$tag"
+    if [[ "$tag" == "${env}-"* ]]; then
+        image_tag_for_compose="${tag#${env}-}"
+    fi
+    export IMAGE_TAG=$image_tag_for_compose
     export IMAGE_FULL=$image_full
     export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
 
