@@ -1813,6 +1813,9 @@ cmd_deploy() {
 
     log_success "Fichier .env.$env prêt pour docker-compose"
 
+    # Exporter un chemin absolu pour les scripts externes (ex: superset_manager.py)
+    export SUPERSET_ENV_FILE="$target_env_file"
+
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
 
