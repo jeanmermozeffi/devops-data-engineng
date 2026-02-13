@@ -85,6 +85,8 @@ PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
 
 # Option de chiffrement (désactivé par défaut)
 ENCRYPT_ENV_FILES="${ENCRYPT_ENV_FILES:-false}"
+# Inclure les outils Superset (superset_manager + exports YAML) si dispo
+INCLUDE_SUPERSET_ASSETS="${INCLUDE_SUPERSET_ASSETS:-auto}"
 
 load_env_config() {
     local env_file="$PROJECT_DIR/deployment/.env.deployment"
@@ -429,6 +431,64 @@ create_package() {
         log_warn "⚠️  .env.prod non trouvé"
     fi
 
+    # Inclure les outils Superset (optionnel)
+    # - scripts/superset_manager.py
+    # - scripts/requirements.txt
+    # - exports/**/yaml + exports/manifest.json (pas de ZIP)
+    if [ "$INCLUDE_SUPERSET_ASSETS" = "auto" ]; then
+        if [ -f "$PROJECT_DIR/scripts/superset_manager.py" ]; then
+            INCLUDE_SUPERSET_ASSETS="true"
+        else
+            INCLUDE_SUPERSET_ASSETS="false"
+        fi
+    fi
+
+    if [ "$INCLUDE_SUPERSET_ASSETS" = "true" ]; then
+        log_info "➕ Inclusion des outils Superset (imports possibles sur le serveur)..."
+        mkdir -p "$PACKAGE_DIR/scripts" "$PACKAGE_DIR/exports"
+
+        if [ -f "$PROJECT_DIR/scripts/superset_manager.py" ]; then
+            cp "$PROJECT_DIR/scripts/superset_manager.py" "$PACKAGE_DIR/scripts/"
+            log_success "✓ scripts/superset_manager.py copié"
+        else
+            log_warn "⚠️  scripts/superset_manager.py non trouvé"
+        fi
+
+        if [ -f "$PROJECT_DIR/scripts/superset-import.sh" ]; then
+            cp "$PROJECT_DIR/scripts/superset-import.sh" "$PACKAGE_DIR/scripts/"
+            chmod +x "$PACKAGE_DIR/scripts/superset-import.sh"
+            log_success "✓ scripts/superset-import.sh copié"
+        fi
+
+        if [ -f "$PROJECT_DIR/scripts/requirements.txt" ]; then
+            cp "$PROJECT_DIR/scripts/requirements.txt" "$PACKAGE_DIR/scripts/"
+            log_success "✓ scripts/requirements.txt copié"
+        else
+            log_warn "⚠️  scripts/requirements.txt non trouvé"
+        fi
+
+        if [ -f "$PROJECT_DIR/exports/manifest.json" ]; then
+            cp "$PROJECT_DIR/exports/manifest.json" "$PACKAGE_DIR/exports/"
+            log_success "✓ exports/manifest.json copié"
+        else
+            log_warn "⚠️  exports/manifest.json non trouvé"
+        fi
+
+        if [ -d "$PROJECT_DIR/exports" ]; then
+            # Copier uniquement les YAML (source de vérité GitOps), pas les ZIP
+            find "$PROJECT_DIR/exports" -type d -name yaml | while read -r yaml_dir; do
+                rel_dir="${yaml_dir#$PROJECT_DIR/}"
+                mkdir -p "$PACKAGE_DIR/$rel_dir"
+                cp -R "$yaml_dir"/. "$PACKAGE_DIR/$rel_dir/"
+            done
+            log_success "✓ exports/**/yaml copiés"
+        else
+            log_warn "⚠️  exports/ non trouvé"
+        fi
+    else
+        log_info "Outils Superset non inclus (imports via CI/CD uniquement)"
+    fi
+
     if [ "$ENV_COPIED" = false ]; then
         log_error "Aucun fichier .env trouvé à la racine du projet"
         log_info "Création des fichiers depuis .env.example..."
@@ -597,6 +657,44 @@ Package minimal pour déployer l'application depuis Docker Hub.
   - `auto-encrypt-envs.sh` : Script d'auto-chiffrement (recommandé)
   - `sensitive-vars.yml` : Configuration des variables sensibles
 - `scripts/.registry-profiles/` : Profils de registry par environnement
+EOF
+
+    if [ "$INCLUDE_SUPERSET_ASSETS" = "true" ]; then
+        cat >> "$PACKAGE_DIR/README.md" <<'EOF'
+
+## 🔁 Superset (optionnel) - Imports sur le serveur
+
+Ce package inclut `scripts/superset_manager.py`, `scripts/superset-import.sh`
+et les YAML de `exports/**/yaml`.
+
+### Import automatique (recommandé)
+
+```bash
+./scripts/superset-import.sh --env prod
+```
+
+Le script gère automatiquement :
+- Le déchiffrement du .env
+- L'installation des dépendances Python (venv)
+- Le health check Superset
+- Le lancement de l'import
+
+### Import via deploy-registry.sh
+
+```bash
+./scripts/deploy-registry.sh superset-import prod
+```
+
+### Import manuel
+
+```bash
+pip3 install -r scripts/requirements.txt
+python3 scripts/superset_manager.py import --all
+```
+EOF
+    fi
+
+    cat >> "$PACKAGE_DIR/README.md" <<'EOF'
 
 ## 🚀 Installation sur VPS
 

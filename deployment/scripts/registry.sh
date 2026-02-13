@@ -834,6 +834,8 @@ cmd_build() {
         secret_file=$(mktemp)
         printf "%s" "$CLEAN_TOKEN" > "$secret_file"
         secret_args+=("--secret" "id=github_token,src=$secret_file")
+        # Exposer aussi sous l'id git_token (utilisé par les Dockerfiles .git pour le clone)
+        secret_args+=("--secret" "id=git_token,src=$secret_file")
 
         # Si c'est GitLab, ajouter aussi le username
         if echo "$GIT_REPO" | grep -q "gitlab.com"; then
@@ -1057,6 +1059,8 @@ cmd_build_push_multiarch() {
         secret_file=$(mktemp)
         printf "%s" "$CLEAN_TOKEN" > "$secret_file"
         secret_args+=("--secret" "id=github_token,src=$secret_file")
+        # Exposer aussi sous l'id git_token (utilisé par les Dockerfiles .git pour le clone)
+        secret_args+=("--secret" "id=git_token,src=$secret_file")
 
         # Si c'est GitLab, ajouter aussi le username
         if echo "$GIT_REPO" | grep -q "gitlab.com"; then
