@@ -13,6 +13,7 @@
 #   ./deploy-registry.sh logs <env> [service]     Voir les logs
 #   ./deploy-registry.sh stop <env>               Arrêter les services
 #   ./deploy-registry.sh restart <env>            Redémarrer les services
+#   ./deploy-registry.sh superset-import <env>    Importer les assets Superset
 #
 # EXAMPLES:
 #   ./deploy-registry.sh deploy dev
@@ -1459,6 +1460,7 @@ interactive_menu() {
         echo -e "  ${WHITE}4)${NC} Voir les logs"
         echo -e "  ${WHITE}5)${NC} Redémarrer les services"
         echo -e "  ${WHITE}6)${NC} Arrêter les services"
+        echo -e "  ${WHITE}16)${NC} ${CYAN}Importer les assets Superset${NC}"
         echo ""
         echo -e "${WHITE}AVANCÉ${NC}"
         echo -e "  ${WHITE}7)${NC} Télécharger une image (sans déployer)"
@@ -1648,6 +1650,16 @@ interactive_menu() {
                 encrypt_existing_profile
                 echo ""
                 read -p "Appuyez sur Entrée pour revenir au menu principal..."
+                ;;
+            16)
+                # Importer les assets Superset
+                env=$(choose_environment)
+                if [ $? -eq 0 ]; then
+                    echo ""
+                    cmd_superset_import "$env"
+                    echo ""
+                    read -p "Appuyez sur Entrée pour revenir au menu principal..."
+                fi
                 ;;
             0)
                 log_info "Au revoir!"
@@ -1976,6 +1988,25 @@ cmd_restart() {
     log_success "Services redémarrés"
 }
 
+# Importer les assets Superset
+cmd_superset_import() {
+    local env=$1
+
+    log_header "IMPORT SUPERSET - Environnement: $env"
+
+    # Verifier que le script superset-import.sh existe
+    local import_script="$SCRIPT_DIR/superset-import.sh"
+    if [ ! -f "$import_script" ]; then
+        log_error "Script superset-import.sh non trouve: $import_script"
+        log_info "Ce script est inclus dans le package de deploiement."
+        log_info "Assurez-vous d'utiliser un package a jour."
+        return 1
+    fi
+
+    # Lancer l'import
+    bash "$import_script" --env "$env"
+}
+
 # ============================================================================
 # MENU D'AIDE
 # ============================================================================
@@ -1998,6 +2029,7 @@ show_help() {
     echo "    logs <env> [service]      Voir les logs (défaut: ${IMAGE_NAME:-api})"
     echo "    stop <env>                Arrêter les services"
     echo "    restart <env>             Redémarrer les services"
+    echo "    superset-import <env>     Importer les assets Superset (dashboards, charts, etc.)"
     echo ""
     echo -e "${CYAN}ENVIRONNEMENTS:${NC}"
     echo "    dev                       Environnement de développement"
@@ -2115,6 +2147,14 @@ case "$COMMAND" in
             exit 1
         fi
         cmd_restart "$@"
+        ;;
+
+    superset-import)
+        if [ $# -lt 1 ]; then
+            log_error "Usage: $0 superset-import <env>"
+            exit 1
+        fi
+        cmd_superset_import "$@"
         ;;
 
     help|--help|-h)
