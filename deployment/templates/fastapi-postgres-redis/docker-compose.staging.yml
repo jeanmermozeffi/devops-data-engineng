@@ -9,6 +9,13 @@ services:
       - ENVIRONMENT=staging
       - LOG_LEVEL=INFO
       - WORKERS=4
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=staging"
+      - "service=api"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=staging"
+      - "cic.service=api"
     command: uvicorn main:app --host 0.0.0.0 --port 80 --workers 4
     deploy:
       resources:
@@ -22,6 +29,13 @@ services:
   postgres:
     ports:
       - "${POSTGRES_STAGING_PORT:-5433}:5432"
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=staging"
+      - "service=postgres"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=staging"
+      - "cic.service=postgres"
     deploy:
       resources:
         limits:
@@ -31,6 +45,13 @@ services:
   redis:
     ports:
       - "${REDIS_STAGING_PORT:-6381}:6379"
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=staging"
+      - "service=redis"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=staging"
+      - "cic.service=redis"
     deploy:
       resources:
         limits:

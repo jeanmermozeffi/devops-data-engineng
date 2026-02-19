@@ -9,6 +9,13 @@ services:
       - ENVIRONMENT=prod
       - LOG_LEVEL=INFO
       - WORKERS=4
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=prod"
+      - "service=api"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=prod"
+      - "cic.service=api"
 
     deploy:
       resources:
@@ -21,6 +28,13 @@ services:
 
   redis:
     # Pas de port exposé en production (sécurité)
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=prod"
+      - "service=redis"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=prod"
+      - "cic.service=redis"
     deploy:
       resources:
         limits:

@@ -56,6 +56,9 @@ services:
             - "project=${PROJECT_NAME}"
             - "environment=${ENV}"
             - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=${ENV}"
+            - "cic.service=api"
             - "image.source=registry"
 
         # Healthcheck
@@ -84,6 +87,9 @@ services:
             - "project=${PROJECT_NAME}"
             - "environment=${ENV}"
             - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=${ENV}"
+            - "cic.service=redis"
 
         command: redis-server --appendonly yes
 
@@ -102,4 +108,3 @@ volumes:
     __PROJECT_NAME__-redis-__ENV__-data:
         driver: local
         name: __PROJECT_NAME__-redis-__ENV__-data
-

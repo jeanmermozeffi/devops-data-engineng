@@ -121,6 +121,9 @@ services:
     labels:
       - "project=${PROJECT_NAME}"
       - "environment=${ENV}"
+      - "<LABEL_NAMESPACE>.project=${PROJECT_NAME}"
+      - "<LABEL_NAMESPACE>.env=${ENV}"
+      - "<LABEL_NAMESPACE>.service=rabbitmq"
 ```
 
 ### Modifier les ressources
@@ -233,7 +236,7 @@ devops init --template my-stack
 1. **Variables** : Toujours utiliser `${VAR:-default}` avec des valeurs par défaut
 2. **Secrets** : Utiliser les fichiers chiffrés pour les données sensibles
 3. **Health Checks** : Ajouter des health checks sur tous les services
-4. **Labels** : Étiqueter tous les conteneurs (project, environment, service)
+4. **Labels** : Étiqueter tous les conteneurs avec `<LABEL_NAMESPACE>.project`, `<LABEL_NAMESPACE>.env`, `<LABEL_NAMESPACE>.service` (et conserver les labels existants)
 5. **Ressources** : Définir des limites en staging/prod
 6. **Réseaux** : Isoler par environnement
 7. **Volumes** : Nommer explicitement les volumes

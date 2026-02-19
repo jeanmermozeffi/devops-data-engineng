@@ -357,12 +357,41 @@ get_container_prefix() {
     echo "$prefix"
 }
 
-get_container_name() {
+get_container_candidates() {
     local env=$1
     local service=$2
     local prefix
     prefix="$(get_container_prefix "$env")"
+
+    # Convention stricte: ${prefix}-${service}-${env}
     echo "${prefix}-${service}-${env}"
+}
+
+get_container_bad_name() {
+    local env=$1
+    local service=$2
+    local prefix
+    prefix="$(get_container_prefix "$env")"
+
+    # Convention incorrecte: ${prefix}-${env}-${service}
+    echo "${prefix}-${env}-${service}"
+}
+
+get_container_name() {
+    local env=$1
+    local service=$2
+    local candidates
+    candidates="$(get_container_candidates "$env" "$service")"
+
+    for container in $candidates; do
+        if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
+            echo "$container"
+            return 0
+        fi
+    done
+
+    # Fallback: première convention
+    echo "${candidates%% *}"
 }
 
 # Vérifier si un conteneur est en cours d'exécution
@@ -606,30 +635,47 @@ cmd_deploy() {
     log_info "Arrêt des anciens conteneurs..."
 
     # Arrêter les conteneurs existants (detection automatique selon le stack)
-    local prefix
-    prefix="$(get_container_prefix "$env")"
     local containers=()
     case "${STACK_TYPE:-fastapi-redis}" in
         monitoring)
-            containers=("${prefix}-prometheus-$env" "${prefix}-grafana-$env" "${prefix}-cadvisor-$env" "${prefix}-node-exporter-$env" "${prefix}-postgres-$env" "${prefix}-postgres-exporter-$env")
+            containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
             ;;
         reporting-superset)
-            containers=("${prefix}-superset-$env" "${prefix}-superset-init-$env" "${prefix}-superset-worker-$env" "${prefix}-superset-beat-$env" "${prefix}-db-$env" "${prefix}-redis-$env")
+            containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
             ;;
         fastapi-postgres-redis)
-            containers=("${prefix}-api-$env" "${prefix}-redis-$env" "${prefix}-postgres-$env")
+            containers=("api" "redis" "postgres")
             ;;
         *)
-            containers=("${prefix}-api-$env" "${prefix}-redis-$env")
+            containers=("api" "redis")
             ;;
     esac
-    for container in "${containers[@]}"; do
+
+    # Refuser la convention ${prefix}-${env}-${service}
+    local bad_containers=()
+    for service in "${containers[@]}"; do
+        local bad_name
+        bad_name="$(get_container_bad_name "$env" "$service")"
+        if docker ps -a --format '{{.Names}}' | grep -q "^${bad_name}$"; then
+            bad_containers+=("$bad_name")
+        fi
+    done
+    if [ ${#bad_containers[@]} -gt 0 ]; then
+        log_error "Convention de nommage invalide détectée: ${bad_containers[*]}"
+        log_error "Attendu: $(get_container_prefix "$env")-<service>-$env"
+        log_error "Corrigez les docker-compose pour utiliser PROJECT_NAME + service + env, puis supprimez ces conteneurs"
+        exit 1
+    fi
+
+    for service in "${containers[@]}"; do
+        local container
+        container="$(get_container_candidates "$env" "$service")"
         if docker ps -a --format '{{.Names}}' | grep -q "^${container}$"; then
             log_warn "Arrêt et suppression du conteneur existant: $container"
             docker stop "$container" 2>/dev/null || true
             docker rm "$container" 2>/dev/null || true
         else
-            log_warn "Aucun conteneur existant à supprimer: $container"
+            log_warn "Aucun conteneur existant à supprimer pour le service: $service"
         fi
     done
 
@@ -921,6 +967,57 @@ cmd_clean() {
     fi
 
     log_success "Nettoyage du projet $project terminé"
+}
+
+
+# Nettoyer les conteneurs avec une convention de nommage invalide
+cmd_cleanup_bad_names() {
+    local env=$1
+
+    if [ -z "$env" ]; then
+        log_error "Environnement requis"
+        echo "Usage: ./deploy.sh cleanup-bad-names <dev|staging|prod>"
+        exit 1
+    fi
+
+    validate_env "$env"
+
+    log_header "NETTOYAGE NOMMAGE - Environnement: $env"
+    confirm_action "Supprimer les conteneurs avec un nommage invalide ?" "$env"
+
+    local containers=()
+    case "${STACK_TYPE:-fastapi-redis}" in
+        monitoring)
+            containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
+            ;;
+        reporting-superset)
+            containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
+            ;;
+        fastapi-postgres-redis)
+            containers=("api" "redis" "postgres")
+            ;;
+        *)
+            containers=("api" "redis")
+            ;;
+    esac
+
+    local removed=false
+    for service in "${containers[@]}"; do
+        local bad_name
+        bad_name="$(get_container_bad_name "$env" "$service")"
+        if docker ps -a --format '{{.Names}}' | grep -q "^${bad_name}$"; then
+            log_warn "Suppression du conteneur mal nommé: $bad_name"
+            docker stop "$bad_name" 2>/dev/null || true
+            docker rm "$bad_name" 2>/dev/null || true
+            removed=true
+        fi
+    done
+
+    if [ "$removed" = false ]; then
+        log_info "Aucun conteneur avec un nommage invalide trouvé"
+    else
+        log_success "Nettoyage terminé"
+    fi
 }
 
 # Backup Redis
@@ -1439,6 +1536,7 @@ show_help() {
     echo "    rebuild <env>                  Reconstruire les images"
     echo "        --cache                    Utiliser le cache"
     echo "    clean <env>                    Nettoyer (env: dev/prod/all)"
+    echo "    cleanup-bad-names <env>         Supprimer les conteneurs mal nommes"
     echo "        --deep                     Nettoyage profond"
     echo "    backup <env>                   Backup Redis"
     echo "    restore <env> <file>           Restaurer Redis"
@@ -1471,6 +1569,7 @@ show_help() {
     echo "    ./deploy.sh logs dev -f"
     echo "    ./deploy.sh shell prod api"
     echo "    ./deploy.sh backup prod"
+    echo "    ./deploy.sh cleanup-bad-names dev"
     echo "    ./deploy.sh nginx reload"
     echo "    ./deploy.sh status all"
     echo ""
@@ -1637,6 +1736,9 @@ main() {
                 shift
             done
             cmd_clean "$ENV" "$DEEP"
+            ;;
+        cleanup-bad-names)
+            cmd_cleanup_bad_names "${1:-}"
             ;;
         backup)
             cmd_backup "${1:-}"

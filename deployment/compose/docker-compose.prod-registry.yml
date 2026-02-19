@@ -22,6 +22,12 @@ services:
 
         # Configuration Traefik (si utilisé)
         labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=prod"
+            - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=prod"
+            - "cic.service=api"
             - "traefik.enable=true"
             - "traefik.http.routers.${PROJECT_NAME}-api-prod.rule=Host(`${PROD_DOMAIN:-api.localhost}`)"
             - "traefik.http.routers.${PROJECT_NAME}-api-prod.entrypoints=websecure"
@@ -41,6 +47,13 @@ services:
     __PROJECT_NAME__-redis-__ENV__:
         # Port Redis non exposé en production (sécurité)
         ports: []
+        labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=prod"
+            - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=prod"
+            - "cic.service=redis"
 
         # Limites de ressources en production
         deploy:
@@ -51,4 +64,3 @@ services:
                 reservations:
                     cpus: '0.25'
                     memory: 256M
-

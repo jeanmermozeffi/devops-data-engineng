@@ -652,6 +652,84 @@ get_git_branch() {
     esac
 }
 
+# Obtenir la branche Git courante
+get_current_git_branch() {
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+
+    if [ -z "$current_branch" ] || [ "$current_branch" == "HEAD" ]; then
+        echo ""
+    else
+        echo "$current_branch"
+    fi
+}
+
+# Choisir une branche Git (menu numéroté, défaut: branche courante)
+choose_git_branch() {
+    local env=$1
+    local env_branch
+    env_branch=$(get_git_branch "$env")
+    local current_branch
+    current_branch=$(get_current_git_branch)
+    local default_branch="${current_branch:-$env_branch}"
+
+    echo "" >&2
+    echo -e "${CYAN}Sélection de la branche Git:${NC}" >&2
+    echo -e "  ${WHITE}Par défaut:${NC} ${GREEN}${default_branch}${NC}" >&2
+    echo "" >&2
+
+    local branches=()
+    while IFS= read -r branch; do
+        [ -n "$branch" ] && branches+=("$branch")
+    done < <(git for-each-ref --sort=refname --format='%(refname:short)' refs/heads 2>/dev/null || true)
+
+    local i=1
+    for branch in "${branches[@]}"; do
+        if [ "$branch" == "$default_branch" ]; then
+            echo -e "  ${GREEN}${i}.${NC} ${WHITE}${branch}${NC} ${GREEN}(défaut)${NC}" >&2
+        else
+            echo -e "  ${GREEN}${i}.${NC} ${branch}" >&2
+        fi
+        ((i++))
+    done
+
+    local custom_option=$i
+    echo -e "  ${GREEN}${custom_option}.${NC} ${WHITE}Entrer une autre branche${NC}" >&2
+    echo "" >&2
+
+    read -p "Choisissez la branche (Entrée=${default_branch}): " branch_choice
+
+    # Entrée vide => valeur par défaut
+    if [ -z "$branch_choice" ]; then
+        echo "$default_branch"
+        return 0
+    fi
+
+    # Choix numéroté
+    if [[ "$branch_choice" =~ ^[0-9]+$ ]]; then
+        if [ "$branch_choice" -ge 1 ] && [ "$branch_choice" -le "${#branches[@]}" ]; then
+            echo "${branches[$((branch_choice-1))]}"
+            return 0
+        fi
+
+        if [ "$branch_choice" -eq "$custom_option" ]; then
+            read -p "Entrez la branche Git: " custom_branch
+            if [ -z "$custom_branch" ]; then
+                log_error "Branche vide" >&2
+                return 1
+            fi
+            echo "$custom_branch"
+            return 0
+        fi
+
+        log_error "Choix de branche invalide" >&2
+        return 1
+    fi
+
+    # Entrée texte => branche directe
+    echo "$branch_choice"
+}
+
 # Construire le nom complet de l'image selon le type de registry
 get_full_image_name() {
     local env=$1
@@ -738,10 +816,11 @@ cmd_build() {
     local version_tag=${2:-$(generate_version_tag "$env")}
     local no_cache=${3:-false}
     local use_git=${4:-true}
+    local git_branch_override=${5:-}
 
     log_header "BUILD IMAGE - Environnement: $env"
 
-    local git_branch=$(get_git_branch "$env")
+    local git_branch=${git_branch_override:-$(get_git_branch "$env")}
     local full_image_name=$(get_full_image_name "$env" "$version_tag")
     local full_image_latest=$(get_full_image_name "$env" "latest")
 
@@ -949,6 +1028,7 @@ cmd_build_push_multiarch() {
     local version_tag=${2:-$(generate_version_tag "$env")}
     local no_cache=${3:-false}
     local use_git=${4:-true}
+    local git_branch_override=${5:-}
 
     log_header "BUILD + PUSH MULTI-ARCH - Environnement: $env"
 
@@ -967,14 +1047,8 @@ cmd_build_push_multiarch() {
         build_mode="clone"
     fi
 
-    # Obtenir la branche Git selon l'environnement
-    local git_branch
-    case "$env" in
-        dev)     git_branch="${DEV_BRANCH:-dev}" ;;
-        staging) git_branch="${STAGING_BRANCH:-staging}" ;;
-        prod)    git_branch="${PROD_BRANCH:-main}" ;;
-        *)       git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')" ;;
-    esac
+    # Obtenir la branche Git selon l'environnement (ou override explicite)
+    local git_branch=${git_branch_override:-$(get_git_branch "$env")}
 
     # Déterminer le Dockerfile selon mode build et environnement
     local dockerfile
@@ -1111,6 +1185,7 @@ cmd_release() {
     local version_tag=${2:-$(generate_version_tag "$env")}
     local no_cache=${3:-false}
     local use_git=${4:-true}
+    local git_branch_override=${5:-}
 
     log_header "RELEASE - Environnement: $env"
 
@@ -1126,11 +1201,11 @@ cmd_release() {
     # Vérifier si buildx est disponible pour multi-arch
     if docker buildx version &>/dev/null; then
         log_info "Docker Buildx détecté - Build multi-architecture (linux/amd64,linux/arm64)"
-        cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git"
+        cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
     else
         log_warn "Docker Buildx non disponible - Build pour architecture locale uniquement"
         # Build local puis push
-        cmd_build "$env" "$version_tag" "$no_cache" "$use_git"
+        cmd_build "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
         cmd_push "$env" "$version_tag"
     fi
 
@@ -1425,7 +1500,13 @@ interactive_mode() {
                 read -p "Utiliser Git clone? (y/n): " use_git_input
                 use_git=$([ "$use_git_input" != "n" ] && echo "true" || echo "false")
 
-                cmd_build "$env" "$version" "$no_cache" "$use_git"
+                git_branch_override=""
+                if [ "$use_git" == "true" ]; then
+                    echo ""
+                    git_branch_override=$(choose_git_branch "$env") || continue
+                fi
+
+                cmd_build "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
@@ -1472,7 +1553,13 @@ interactive_mode() {
                 read -p "Utiliser Git clone? (y/n): " use_git_input
                 use_git=$([ "$use_git_input" != "n" ] && echo "true" || echo "false")
 
-                cmd_release "$env" "$version" "$no_cache" "$use_git"
+                git_branch_override=""
+                if [ "$use_git" == "true" ]; then
+                    echo ""
+                    git_branch_override=$(choose_git_branch "$env") || continue
+                fi
+
+                cmd_release "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
@@ -1568,7 +1655,13 @@ interactive_mode() {
                 read -p "Utiliser Git clone? (y/n): " use_git_input
                 use_git=$([ "$use_git_input" != "n" ] && echo "true" || echo "false")
 
-                cmd_build_push_multiarch "$env" "$version" "$no_cache" "$use_git"
+                git_branch_override=""
+                if [ "$use_git" == "true" ]; then
+                    echo ""
+                    git_branch_override=$(choose_git_branch "$env") || continue
+                fi
+
+                cmd_build_push_multiarch "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
@@ -1613,15 +1706,18 @@ ${CYAN}BUILD & RELEASE:${NC}
     build <env> [version] [options]            Construire une image (architecture locale)
         --no-cache                             Construire sans cache
         --local                                Utiliser les fichiers locaux (pas Git)
+        --branch <nom>                         Forcer la branche Git à builder
         --profile <name>                       Utiliser un profil spécifique
 
     build-push-multiarch <env> [version]       Build multi-arch (amd64+arm64) et push
         --no-cache                             Construire sans cache
         --local                                Utiliser les fichiers locaux (pas Git)
+        --branch <nom>                         Forcer la branche Git à builder
 
     push <env> [version]                       Envoyer l'image vers le registry
     pull <env> [version]                       Télécharger l'image depuis le registry
     release <env> [version] [options]          Build + Push en une commande (arch locale)
+        --branch <nom>                         Forcer la branche Git à builder
 
 ${CYAN}GESTION:${NC}
     list [env]                         Lister les images locales
@@ -1784,17 +1880,23 @@ main() {
             VERSION=${2:-}
             NO_CACHE=false
             USE_GIT=true
+            GIT_BRANCH_OVERRIDE=""
             shift 2 2>/dev/null || shift 1 2>/dev/null || true
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
                     --local) USE_GIT=false ;;
+                    --branch)
+                        shift
+                        [ -z "$1" ] && { log_error "Valeur manquante pour --branch"; exit 1; }
+                        GIT_BRANCH_OVERRIDE="$1"
+                        ;;
                     --profile) shift ;; # Déjà traité
                 esac
                 shift
             done
             [ -z "$VERSION" ] && VERSION=$(generate_version_tag "$ENV")
-            cmd_build "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT"
+            cmd_build "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE"
             ;;
         push)
             cmd_push "${1:-}" "${2:-latest}"
@@ -1807,35 +1909,47 @@ main() {
             VERSION=${2:-}
             NO_CACHE=false
             USE_GIT=true
+            GIT_BRANCH_OVERRIDE=""
             shift 2 2>/dev/null || shift 1 2>/dev/null || true
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
                     --local) USE_GIT=false ;;
+                    --branch)
+                        shift
+                        [ -z "$1" ] && { log_error "Valeur manquante pour --branch"; exit 1; }
+                        GIT_BRANCH_OVERRIDE="$1"
+                        ;;
                     --profile) shift ;; # Déjà traité
                 esac
                 shift
             done
             [ -z "$VERSION" ] && VERSION=$(generate_version_tag "$ENV")
-            cmd_release "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT"
+            cmd_release "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE"
             ;;
         build-push-multiarch|multiarch)
             ENV=${1:-}
             VERSION=${2:-}
             NO_CACHE=false
             USE_GIT=true
+            GIT_BRANCH_OVERRIDE=""
             shift 2 2>/dev/null || shift 1 2>/dev/null || true
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
                     --local) USE_GIT=false ;;
+                    --branch)
+                        shift
+                        [ -z "$1" ] && { log_error "Valeur manquante pour --branch"; exit 1; }
+                        GIT_BRANCH_OVERRIDE="$1"
+                        ;;
                     --profile) shift ;; # Déjà traité
                 esac
                 shift
             done
             [ -z "$ENV" ] && { log_error "Environnement requis"; exit 1; }
             [ -z "$VERSION" ] && VERSION=$(generate_version_tag "$ENV")
-            cmd_build_push_multiarch "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT"
+            cmd_build_push_multiarch "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE"
             ;;
         list)
             cmd_list "${1:-}"
