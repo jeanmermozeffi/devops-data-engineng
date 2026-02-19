@@ -40,6 +40,18 @@ print_separator() {
     echo -e "${CYAN}────────────────────────────────────────────────────${NC}"
 }
 
+sed_inplace() {
+    local expr="$1"
+    local file="$2"
+
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$expr" "$file"
+    else
+        sed -i "" "$expr" "$file"
+    fi
+}
+
+
 # ============================================================================
 # CHARGEMENT DE LA CONFIGURATION
 # ============================================================================
@@ -298,6 +310,16 @@ create_package() {
         fi
     done
 
+    # Inclure aussi la stack monitoring centralisee (Option A) si presente
+    MONITORING_DIR_SRC="$COMPOSE_SRC/monitoring"
+    if [ -d "$MONITORING_DIR_SRC" ]; then
+        mkdir -p "$PACKAGE_DIR/deployment"
+        cp -r "$MONITORING_DIR_SRC" "$PACKAGE_DIR/deployment/"
+        log_success "✓ deployment/monitoring copié (Option A)"
+    else
+        log_info "Dossier deployment/monitoring non détecté (optionnel)"
+    fi
+
     # Ajuster les chemins relatifs dans les fichiers docker-compose pour le package minimal
     # En développement, les fichiers sont dans deployment/ donc ../.env.* pointe vers la racine
     # Dans le package minimal, tout est à la racine donc il faut ./.env.*
@@ -305,7 +327,7 @@ create_package() {
     for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
         if [ -f "$compose_file" ]; then
             # Remplacer ../.env. par ./.env. (chemins relatifs)
-            sed -i 's|\.\./\.env\.|./.env.|g' "$compose_file"
+            sed_inplace 's|\.\./\.env\.|./.env.|g' "$compose_file"
         fi
     done
     log_success "✓ Chemins .env ajustés"
@@ -315,8 +337,16 @@ create_package() {
     # Ex: postgres-exporter (build), prometheus/ (config), grafana/ (dashboards)
     log_info "Détection des ressources locales dans les docker-compose..."
     LOCAL_RESOURCES_COPIED=0
-    # Liste des chemins déjà traités (éviter les doublons)
-    declare -A COPIED_PATHS
+    # Liste des chemins déjà traités (éviter les doublons) compatible Bash 3 (macOS)
+    COPIED_PATHS=""
+    is_path_already_copied() {
+        local path="$1"
+        printf '%s\n' "$COPIED_PATHS" | grep -Fxq "$path"
+    }
+    mark_path_as_copied() {
+        local path="$1"
+        COPIED_PATHS="${COPIED_PATHS}"$'\n'"$path"
+    }
 
     for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
         [ -f "$compose_file" ] || continue
@@ -358,7 +388,7 @@ create_package() {
             local top_dir=$(echo "$pkg_relative" | cut -d'/' -f1)
 
             # Vérifier si déjà copié
-            if [ -n "${COPIED_PATHS[$top_dir]+x}" ]; then
+            if is_path_already_copied "$top_dir"; then
                 continue
             fi
 
@@ -368,13 +398,13 @@ create_package() {
             if [ -d "$source_top" ]; then
                 cp -r "$source_top" "$dest_top"
                 log_success "✓ Dossier copié: $top_dir/"
-                COPIED_PATHS[$top_dir]=1
+                mark_path_as_copied "$top_dir"
                 LOCAL_RESOURCES_COPIED=$((LOCAL_RESOURCES_COPIED + 1))
             elif [ -f "$source_path" ]; then
                 mkdir -p "$(dirname "$PACKAGE_DIR/$pkg_relative")"
                 cp "$source_path" "$PACKAGE_DIR/$pkg_relative"
                 log_success "✓ Fichier copié: $pkg_relative"
-                COPIED_PATHS[$pkg_relative]=1
+                mark_path_as_copied "$pkg_relative"
                 LOCAL_RESOURCES_COPIED=$((LOCAL_RESOURCES_COPIED + 1))
             else
                 log_warn "⚠️  Ressource non trouvée: $source_path"
@@ -388,7 +418,7 @@ create_package() {
     log_info "Ajustement de tous les chemins relatifs ../ → ./ ..."
     for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
         if [ -f "$compose_file" ]; then
-            sed -i 's|\.\./|./|g' "$compose_file"
+            sed_inplace 's|\.\./|./|g' "$compose_file"
         fi
     done
 
