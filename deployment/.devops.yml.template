@@ -11,6 +11,10 @@ project_name: my-project
 # Nom du projet Docker Compose (si différent du nom du projet)
 compose_project_name: my-project
 
+# Namespace des labels de monitoring
+# Exemples: cic, orange, synelia
+label_namespace: cic
+
 # ============================================================================
 # STRUCTURE DU PROJET (optionnel, valeurs par défaut ci-dessous)
 # ============================================================================

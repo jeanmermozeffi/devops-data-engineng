@@ -18,9 +18,21 @@ services:
             - RELOAD=true
 
         labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=dev"
+            - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=dev"
+            - "cic.service=api"
             - "traefik.enable=false"
 
     __PROJECT_NAME__-redis-__ENV__:
         ports:
             - "${REDIS_DEV_PORT:-6379}:6379"
-
+        labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=dev"
+            - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=dev"
+            - "cic.service=redis"

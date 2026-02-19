@@ -9,12 +9,33 @@ services:
       - ENVIRONMENT=dev
       - LOG_LEVEL=DEBUG
       - RELOAD=true
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=dev"
+      - "service=api"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=dev"
+      - "cic.service=api"
     command: uvicorn main:app --host 0.0.0.0 --port 80 --reload
 
   postgres:
     ports:
       - "${POSTGRES_DEV_PORT:-5432}:5432"  # Exposé pour debug/pgAdmin
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=dev"
+      - "service=postgres"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=dev"
+      - "cic.service=postgres"
 
   redis:
     ports:
       - "${REDIS_DEV_PORT:-6379}:6379"  # Exposé pour debug
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=dev"
+      - "service=redis"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=dev"
+      - "cic.service=redis"

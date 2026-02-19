@@ -25,6 +25,12 @@ services:
                     cpus: '0.5'
                     memory: 512M
         labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=staging"
+            - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=staging"
+            - "cic.service=api"
             - "traefik.enable=true"
             - "traefik.http.routers.${PROJECT_NAME}-api-staging.rule=Host(`${STAGING_DOMAIN:-api.staging.localhost}`)"
             - "traefik.http.services.${PROJECT_NAME}-api-staging.loadbalancer.server.port=80"
@@ -32,9 +38,15 @@ services:
     __PROJECT_NAME__-redis-__ENV__:
         ports:
             - "${REDIS_STAGING_PORT:-6381}:6379"
+        labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=staging"
+            - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=staging"
+            - "cic.service=redis"
         deploy:
             resources:
                 limits:
                     cpus: '0.5'
                     memory: 512M
-

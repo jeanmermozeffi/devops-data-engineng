@@ -445,6 +445,25 @@ build_image_full() {
     fi
 }
 
+# Résoudre la valeur IMAGE_TAG attendue par docker-compose.registry.yml
+# Compatibilité:
+# - Nouveau format: ${ENV}-${IMAGE_TAG}  -> IMAGE_TAG=latest
+# - Ancien format: ${IMAGE_TAG}          -> IMAGE_TAG=dev-latest
+resolve_compose_image_tag() {
+    local env=$1
+    local tag=$2
+    local compose_file="$DEPLOYMENT_DIR/docker-compose.registry.yml"
+    local image_tag_for_compose="$tag"
+
+    if [ -f "$compose_file" ] && grep -q '\${ENV}-\${IMAGE_TAG' "$compose_file"; then
+        if [[ "$tag" == "${env}-"* ]]; then
+            image_tag_for_compose="${tag#${env}-}"
+        fi
+    fi
+
+    echo "$image_tag_for_compose"
+}
+
 # Lister les tags disponibles dans le registry
 list_available_tags() {
     local env=$1
@@ -1739,12 +1758,10 @@ cmd_deploy() {
     # ENV est utilisé dans docker-compose.yml pour ${ENV}
     export ENV=$env
     export ENVIRONMENT=$env
-    # docker-compose.registry.yml utilise ${ENV}-${IMAGE_TAG}
-    # Si le tag contient déjà le prefix env (ex: dev-latest), éviter dev-dev-latest
-    local image_tag_for_compose="$tag"
-    if [[ "$tag" == "${env}-"* ]]; then
-        image_tag_for_compose="${tag#${env}-}"
-    fi
+    # Adapter IMAGE_TAG au format attendu par le docker-compose.registry.yml utilisé
+    # (compatibilité ancien/nouveau format)
+    local image_tag_for_compose
+    image_tag_for_compose=$(resolve_compose_image_tag "$env" "$tag")
     export IMAGE_TAG=$image_tag_for_compose
     export IMAGE_FULL=$image_full
     export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"

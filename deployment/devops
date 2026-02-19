@@ -73,6 +73,7 @@ load_project_config() {
         case "$key" in
             project_name) export PROJECT_NAME="$value" ;;
             compose_project_name) export COMPOSE_PROJECT_NAME="$value" ;;
+            label_namespace) export LABEL_NAMESPACE="$value" ;;
             registry_username) export REGISTRY_USERNAME="$value" ;;
             registry_url) export REGISTRY_URL="$value" ;;
             image_name) export IMAGE_NAME="$value" ;;
@@ -124,6 +125,7 @@ load_project_config() {
     # Définir les valeurs par défaut si non spécifiées
     export PROJECT_NAME="${PROJECT_NAME:-app}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}"
+    export LABEL_NAMESPACE="${LABEL_NAMESPACE:-cic}"
     export IMAGE_NAME="${IMAGE_NAME:-$PROJECT_NAME}"
     export DEV_PORT="${DEV_PORT:-8001}"
     export STAGING_PORT="${STAGING_PORT:-8002}"
@@ -173,6 +175,31 @@ has_project_compose() {
     [ -d "$CURRENT_PROJECT_DIR/$deployment_dir" ] && [ -f "$CURRENT_PROJECT_DIR/$deployment_dir/docker-compose.yml" ]
 }
 
+run_label_standardizer() {
+    local mode="$1"
+    shift
+
+    local labels_script="$DEVOPS_ROOT/scripts/standardize-compose-labels.py"
+    local deployment_dir="$CURRENT_PROJECT_DIR/${DEPLOYMENT_DIR:-deployment}"
+
+    if [ ! -f "$labels_script" ]; then
+        log_error "Script labels introuvable: $labels_script"
+        return 1
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 est requis pour la commande labels"
+        return 1
+    fi
+
+    python3 "$labels_script" \
+        --mode "$mode" \
+        --deployment-dir "$deployment_dir" \
+        --project-name "${PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-app}}" \
+        --label-prefix "${LABEL_NAMESPACE:-cic}" \
+        "$@"
+}
+
 # ============================================================================
 # COMMANDES
 # ============================================================================
@@ -198,6 +225,9 @@ project_name: $project_name
 
 # Nom du projet Docker Compose (si différent du nom du projet)
 compose_project_name: $project_name
+
+# Namespace des labels de monitoring (ex: cic, orange, synelia)
+label_namespace: cic
 
 # Configuration Docker Registry
 registry_username: effijeanmermoz
@@ -309,6 +339,7 @@ EOF
 
 project_name: $project_name
 compose_project_name: $project_name
+label_namespace: cic
 
 registry_username: your-dockerhub-username
 registry_url: docker.io
@@ -394,6 +425,46 @@ EOF
     done
 
     log_success "docker-compose copiés et personnalisés pour $project_name"
+
+    # Standardiser les labels <namespace>.* dès l'initialisation
+    if command -v python3 >/dev/null 2>&1 && [ -f "$DEVOPS_ROOT/scripts/standardize-compose-labels.py" ]; then
+        local previous_project_name="${PROJECT_NAME:-}"
+        local previous_compose_project_name="${COMPOSE_PROJECT_NAME:-}"
+        local previous_deployment_dir="${DEPLOYMENT_DIR:-}"
+        local previous_label_namespace="${LABEL_NAMESPACE:-}"
+
+        export PROJECT_NAME="$project_name"
+        export COMPOSE_PROJECT_NAME="$project_name"
+        export DEPLOYMENT_DIR="deployment"
+        export LABEL_NAMESPACE="cic"
+
+        if run_label_standardizer "sync" --no-backup >/dev/null 2>&1; then
+            log_success "Labels ${LABEL_NAMESPACE}.* standardises sur les docker-compose"
+        else
+            log_warn "Standardisation automatique des labels impossible (a lancer plus tard avec: devops labels sync)"
+        fi
+
+        if [ -n "$previous_project_name" ]; then
+            export PROJECT_NAME="$previous_project_name"
+        else
+            unset PROJECT_NAME
+        fi
+        if [ -n "$previous_compose_project_name" ]; then
+            export COMPOSE_PROJECT_NAME="$previous_compose_project_name"
+        else
+            unset COMPOSE_PROJECT_NAME
+        fi
+        if [ -n "$previous_deployment_dir" ]; then
+            export DEPLOYMENT_DIR="$previous_deployment_dir"
+        else
+            unset DEPLOYMENT_DIR
+        fi
+        if [ -n "$previous_label_namespace" ]; then
+            export LABEL_NAMESPACE="$previous_label_namespace"
+        else
+            unset LABEL_NAMESPACE
+        fi
+    fi
 
     # =========================================================================
     # 2.3 Créer les fichiers .env si nécessaire
@@ -562,6 +633,34 @@ cmd_deploy_registry() {
     bash "$deploy_registry_script" "$@"
 }
 
+cmd_labels() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local action="${1:-sync}"
+    if [[ "$action" == --* ]]; then
+        action="sync"
+    else
+        shift || true
+    fi
+
+    log_header "LABELS - $PROJECT_NAME"
+
+    case "$action" in
+        sync)
+            run_label_standardizer "sync" "$@"
+            ;;
+        check)
+            run_label_standardizer "check" "$@"
+            ;;
+        *)
+            log_error "Action labels inconnue: $action"
+            echo "Usage: devops labels [sync|check] [--label-prefix namespace] [--dry-run] [--no-backup]"
+            return 1
+            ;;
+    esac
+}
+
 cmd_interactive() {
     load_project_config
     export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
@@ -581,6 +680,7 @@ cmd_interactive() {
         echo -e "  ${CYAN}4)${NC} ${GREEN}deploy-registry${NC} - Déployer depuis Docker Hub"
         echo -e "  ${CYAN}5)${NC} ${GREEN}audit${NC}          - Audit de sécurité"
         echo -e "  ${CYAN}6)${NC} ${GREEN}encrypt${NC}        - Chiffrer les fichiers .env"
+        echo -e "  ${CYAN}7)${NC} ${GREEN}labels${NC}         - Standardiser les labels <namespace>.*"
         echo ""
         echo -e "  ${CYAN}h)${NC} ${GREEN}help${NC}           - Afficher l'aide complète"
         echo -e "  ${CYAN}0)${NC} ${RED}Quitter${NC}"
@@ -638,6 +738,13 @@ cmd_interactive() {
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
+            7)
+                read -p "Action labels (sync/check) [sync]: " labels_action
+                labels_action="${labels_action:-sync}"
+                cmd_labels "$labels_action"
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
             h|H)
                 cmd_help
                 echo ""
@@ -680,6 +787,7 @@ cmd_help() {
     echo ""
     echo -e "    ${GREEN}audit${NC}                   Audit de sécurité du projet"
     echo -e "    ${GREEN}encrypt [file]${NC}          Chiffrer les fichiers .env"
+    echo -e "    ${GREEN}labels [sync|check]${NC}     Standardiser/verifier les labels <namespace>.*"
     echo -e "    ${GREEN}help${NC}                    Afficher cette aide"
     echo ""
     echo -e "${WHITE}EXEMPLES:${NC}"
@@ -689,6 +797,9 @@ cmd_help() {
     echo -e "    ${CYAN}devops package${NC}               # Créer un package"
     echo -e "    ${CYAN}devops registry release prod v1.0.0${NC}"
     echo -e "    ${CYAN}devops deploy-registry prod${NC}"
+    echo -e "    ${CYAN}devops labels sync${NC}          # Forcer les labels du namespace configure"
+    echo -e "    ${CYAN}devops labels sync --label-prefix orange${NC}"
+    echo -e "    ${CYAN}devops labels check${NC}         # Vérifier la conformité des labels"
     echo ""
     echo -e "${WHITE}CONFIGURATION:${NC}"
     echo ""
@@ -734,6 +845,9 @@ main() {
             ;;
         deploy-registry)
             cmd_deploy_registry "$@"
+            ;;
+        labels)
+            cmd_labels "$@"
             ;;
         interactive|menu)
             cmd_interactive

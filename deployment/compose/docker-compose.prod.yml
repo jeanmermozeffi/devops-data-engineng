@@ -25,6 +25,12 @@ services:
                     cpus: '1.0'
                     memory: 1G
         labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=prod"
+            - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=prod"
+            - "cic.service=api"
             - "traefik.enable=true"
             - "traefik.http.routers.${PROJECT_NAME}-api-prod.rule=Host(`${PROD_DOMAIN:-api.localhost}`)"
             - "traefik.http.services.${PROJECT_NAME}-api-prod.loadbalancer.server.port=80"
@@ -33,6 +39,13 @@ services:
 
     __PROJECT_NAME__-redis-__ENV__:
         # Pas de port exposé en production (sécurité)
+        labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=prod"
+            - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=prod"
+            - "cic.service=redis"
         deploy:
             resources:
                 limits:

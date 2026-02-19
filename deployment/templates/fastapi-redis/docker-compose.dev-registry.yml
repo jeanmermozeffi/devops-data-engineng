@@ -8,7 +8,21 @@ services:
     environment:
       - ENVIRONMENT=dev
       - LOG_LEVEL=DEBUG
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=dev"
+      - "service=api"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=dev"
+      - "cic.service=api"
 
   redis:
     ports:
       - "${REDIS_DEV_PORT:-6379}:6379"  # Exposé pour debug
+    labels:
+      - "project=${PROJECT_NAME}"
+      - "environment=dev"
+      - "service=redis"
+      - "cic.project=${PROJECT_NAME}"
+      - "cic.env=dev"
+      - "cic.service=redis"

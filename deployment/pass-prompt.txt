@@ -21,6 +21,7 @@ Etapes a realiser :
 2. CREER le fichier .devops.yml a la racine du projet :
    - Se baser sur le template : devops-enginering/deployment/.devops.yml.template
    - Adapter les variables au projet (nom, ports, services, stack_type)
+   - Definir label_namespace (ex: cic, orange, synelia)
    - Configurer les ports par environnement (dev/staging/prod)
 
 3. CREER le fichier .devops.yml.example (version sans secrets) :
@@ -36,7 +37,15 @@ Etapes a realiser :
       - container_name : ${PROJECT_NAME}-{service}-${ENV}
       - Reseaux : ${PROJECT_NAME}-${ENV}-network
       - Volumes nommes : ${PROJECT_NAME}-{service}-${ENV}-data
-      - Labels : project, environment, service, monitoring.enabled
+      - Labels obligatoires (sur chaque service, y compris en override si labels present) :
+        <LABEL_NAMESPACE>.project, <LABEL_NAMESPACE>.env, <LABEL_NAMESPACE>.service
+      - LABEL_NAMESPACE doit etre defini dans .devops.yml (ex: cic, orange, synelia)
+      - Garder les labels existants (traefik, monitoring, image.source, etc.)
+      - Format attendu:
+        labels:
+          - "<LABEL_NAMESPACE>.project=<nom-projet>"
+          - "<LABEL_NAMESPACE>.env=<dev|staging|prod>"
+          - "<LABEL_NAMESPACE>.service=<nom-logique-service>"
       - Health checks sur chaque service
 
    b) docker-compose.dev.yml (surcharge dev) :

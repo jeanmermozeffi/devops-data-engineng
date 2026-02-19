@@ -18,6 +18,12 @@ services:
             - RELOAD=false
 
         labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=staging"
+            - "service=api"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=staging"
+            - "cic.service=api"
             - "traefik.enable=true"
             - "traefik.http.routers.${PROJECT_NAME}-api-staging.rule=Host(`${STAGING_DOMAIN:-api.staging.localhost}`)"
             - "traefik.http.routers.${PROJECT_NAME}-api-staging.entrypoints=websecure"
@@ -36,6 +42,13 @@ services:
     __PROJECT_NAME__-redis-__ENV__:
         ports:
             - "${REDIS_STAGING_PORT:-6381}:6379"
+        labels:
+            - "project=${PROJECT_NAME}"
+            - "environment=staging"
+            - "service=redis"
+            - "cic.project=${PROJECT_NAME}"
+            - "cic.env=staging"
+            - "cic.service=redis"
 
         deploy:
             resources:
@@ -45,4 +58,3 @@ services:
                 reservations:
                     cpus: '0.25'
                     memory: 128M
-
