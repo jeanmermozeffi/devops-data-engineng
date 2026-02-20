@@ -1184,13 +1184,16 @@ transfer_via_ssh() {
             cd ${SSH_PATH}
             rm -rf ${bak} && mkdir -p ${bak}
             cp -a scripts/.registry-profiles ${bak}/ 2>/dev/null || true
-            cp .env.key ${bak}/ 2>/dev/null || true
+            [ -f .env.key ] && cp .env.key ${bak}/ 2>/dev/null || true
             tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null
             rm -f ${PROJECT_NAME}.tar.gz
             find . -name '._*' -delete 2>/dev/null || true
             cp -a ${bak}/.registry-profiles/. scripts/.registry-profiles/ 2>/dev/null || true
-            cp ${bak}/.env.key .env.key 2>/dev/null || true
+            [ -f ${bak}/.env.key ] && cp ${bak}/.env.key .env.key 2>/dev/null || true
             rm -rf ${bak}
+            [ -d .env.key ] && rm -rf .env.key
+            if [ ! -s .env.key ] && [ -n '${ENV_ENCRYPTION_KEY}' ]; then printf '%s' '${ENV_ENCRYPTION_KEY}' > .env.key && chmod 600 .env.key && echo '🔑 Clé de chiffrement initialisée depuis .devops.yml'; fi
+            if [ -s .env.key ] && [ -f .env.prod ]; then echo '🔐 Chiffrement automatique des .env...' && bash scripts/auto-encrypt-envs.sh --auto-confirm 2>&1 || true; fi
             chmod +x install.sh scripts/*.sh 2>/dev/null || true
             echo '✅ Extraction terminée (fichiers sensibles préservés)'"
 
@@ -1237,13 +1240,16 @@ transfer_via_ssh() {
             cd ${SSH_PATH}
             rm -rf ${bak} && mkdir -p ${bak}
             cp -a scripts/.registry-profiles ${bak}/ 2>/dev/null || true
-            cp .env.key ${bak}/ 2>/dev/null || true
+            [ -f .env.key ] && cp .env.key ${bak}/ 2>/dev/null || true
             tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null
             rm -f ${PROJECT_NAME}.tar.gz
             find . -name '._*' -delete 2>/dev/null || true
             cp -a ${bak}/.registry-profiles/. scripts/.registry-profiles/ 2>/dev/null || true
-            cp ${bak}/.env.key .env.key 2>/dev/null || true
+            [ -f ${bak}/.env.key ] && cp ${bak}/.env.key .env.key 2>/dev/null || true
             rm -rf ${bak}
+            [ -d .env.key ] && rm -rf .env.key
+            if [ ! -s .env.key ] && [ -n '${ENV_ENCRYPTION_KEY}' ]; then printf '%s' '${ENV_ENCRYPTION_KEY}' > .env.key && chmod 600 .env.key && echo '🔑 Clé de chiffrement initialisée depuis .devops.yml'; fi
+            if [ -s .env.key ] && [ -f .env.prod ]; then echo '🔐 Chiffrement automatique des .env...' && bash scripts/auto-encrypt-envs.sh --auto-confirm 2>&1 || true; fi
             chmod +x install.sh scripts/*.sh 2>/dev/null || true
             echo '✅ Extraction terminée (fichiers sensibles préservés)'"
 
