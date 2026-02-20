@@ -519,6 +519,37 @@ create_package() {
         log_info "Outils Superset non inclus (imports via CI/CD uniquement)"
     fi
 
+    # Inclure le compose RH (base de donnees test) dans un dossier dedie
+    # Cherche d'abord dans PROJECT_DIR, puis dans SUPSERSET_PROJECT_DIR si defini
+    RH_SOURCE_DIRS=("$PROJECT_DIR")
+    if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
+        RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
+    fi
+
+    RH_COMPOSE_SRC=""
+    for d in "${RH_SOURCE_DIRS[@]}"; do
+        if [ -f "$d/docker-compose.rh.yml" ]; then
+            RH_COMPOSE_SRC="$d/docker-compose.rh.yml"
+            break
+        fi
+    done
+
+    if [ -n "$RH_COMPOSE_SRC" ]; then
+        mkdir -p "$PACKAGE_DIR/docker"
+        cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker/"
+        log_success "✓ docker/docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
+    else
+        log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
+    fi
+
+    # Copier Makefile si present (utile pour outils/venv locaux)
+    if [ -f "$PROJECT_DIR/Makefile" ]; then
+        cp "$PROJECT_DIR/Makefile" "$PACKAGE_DIR/"
+        log_success "✓ Makefile copié"
+    else
+        log_warn "⚠️  Makefile non trouvé"
+    fi
+
     if [ "$ENV_COPIED" = false ]; then
         log_error "Aucun fichier .env trouvé à la racine du projet"
         log_info "Création des fichiers depuis .env.example..."
@@ -605,20 +636,35 @@ EOFPROFILE
     }
 
     # Copier les profils registry existants
+    # Priorité: 1) projet cible  2) répertoire devops-scripts  3) profils de base
     log_info "Copie des profils registry..."
     mkdir -p "$PACKAGE_DIR/scripts/.registry-profiles"
 
     PROFILES_DIR="$PROJECT_DIR/$DEPLOYMENT_SUBDIR/scripts/.registry-profiles"
+    PROFILES_DIR_DEVOPS="$SCRIPT_DIR/.registry-profiles"
+
+    _copy_profiles_from() {
+        local src="$1"
+        cp -r "$src"/* "$PACKAGE_DIR/scripts/.registry-profiles/" 2>/dev/null || true
+        local count
+        count=$(find "$PACKAGE_DIR/scripts/.registry-profiles" -type f \( -name "*.env" -o -name "*.env.encrypted" \) | wc -l)
+        echo "$count"
+    }
 
     if [ -d "$PROFILES_DIR" ] && [ -n "$(ls -A "$PROFILES_DIR" 2>/dev/null)" ]; then
-        cp -r "$PROFILES_DIR"/* "$PACKAGE_DIR/scripts/.registry-profiles/" 2>/dev/null || true
-        profile_count=$(find "$PACKAGE_DIR/scripts/.registry-profiles" -type f \( -name "*.env" -o -name "*.env.encrypted" \) | wc -l)
-
+        profile_count=$(_copy_profiles_from "$PROFILES_DIR")
         if [ "$profile_count" -gt 0 ]; then
-            log_success "✓ $profile_count profil(s) registry copié(s) depuis vos profils existants"
-            log_info "  Vos tokens et configuration complète sont préservés"
+            log_success "✓ $profile_count profil(s) copié(s) depuis le projet cible"
         else
-            log_warn "⚠️  Aucun profil trouvé dans $PROFILES_DIR"
+            log_warn "⚠️  Aucun profil trouvé dans $PROFILES_DIR, tentative depuis devops-scripts..."
+            _create_basic_profiles
+        fi
+    elif [ -d "$PROFILES_DIR_DEVOPS" ] && [ -n "$(ls -A "$PROFILES_DIR_DEVOPS" 2>/dev/null)" ]; then
+        profile_count=$(_copy_profiles_from "$PROFILES_DIR_DEVOPS")
+        if [ "$profile_count" -gt 0 ]; then
+            log_success "✓ $profile_count profil(s) copié(s) depuis les scripts devops ($PROFILES_DIR_DEVOPS)"
+            log_info "  Tokens et configuration préservés"
+        else
             log_info "  Création de profils de base..."
             _create_basic_profiles
         fi
@@ -948,6 +994,7 @@ EOF
 set -e
 
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo -e "${GREEN}Installation du package ${PROJECT_NAME}${NC}"
@@ -959,12 +1006,32 @@ chmod +x scripts/*.sh 2>/dev/null || true
 # Créer les répertoires nécessaires
 mkdir -p logs
 
+# Préparer l'environnement virtuel pour les outils Superset (si présents)
+if [ -f "scripts/superset_manager.py" ]; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo -e "${YELLOW}python3 non trouvé, venv non créé${NC}"
+    else
+        VENV_DIR=".venv"
+        if [ ! -f "$VENV_DIR/bin/python3" ]; then
+            echo -e "${GREEN}Création venv: $VENV_DIR${NC}"
+            python3 -m venv "$VENV_DIR"
+        fi
+        if [ -f "scripts/requirements.txt" ]; then
+            echo -e "${GREEN}Installation des dépendances Python (scripts/requirements.txt)${NC}"
+            "$VENV_DIR/bin/pip" install --quiet -r "scripts/requirements.txt"
+        else
+            echo -e "${YELLOW}requirements.txt manquant, dépendances non installées${NC}"
+        fi
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}✓ Installation terminée${NC}"
 echo ""
 echo "Prochaines étapes:"
 echo "  1. Configurer les .env.* selon votre environnement"
-echo "  2. Déployer: ./scripts/deploy-registry.sh deploy dev"
+echo "  2. Activer le venv: source .venv/bin/activate"
+echo "  3. Déployer: ./scripts/deploy-registry.sh deploy dev"
 echo ""
 EOF
 
@@ -1111,19 +1178,21 @@ transfer_via_ssh() {
 
         # Décompresser automatiquement sur le serveur (sans question)
         log_info "Extraction de l'archive sur le serveur..."
+        local bak="/tmp/.sensitive-${PROJECT_NAME}"
 
-        sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
-            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
-            rm -f ${PROJECT_NAME}.tar.gz && \
-            shopt -s dotglob && \
-            d=\$(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -n 2) && \
-            if [ \$(printf '%s\n' \"\$d\" | wc -l) -eq 1 ]; then \
-                mv -f \"\$d\"/* . 2>/dev/null || true; \
-                rmdir \"\$d\" 2>/dev/null || true; \
-            fi && \
-            find . -name '._*' -delete 2>/dev/null || true && \
-            chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
-            echo '✅ Extraction terminée'"
+        sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "
+            cd ${SSH_PATH}
+            rm -rf ${bak} && mkdir -p ${bak}
+            cp -a scripts/.registry-profiles ${bak}/ 2>/dev/null || true
+            cp .env.key ${bak}/ 2>/dev/null || true
+            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null
+            rm -f ${PROJECT_NAME}.tar.gz
+            find . -name '._*' -delete 2>/dev/null || true
+            cp -a ${bak}/.registry-profiles/. scripts/.registry-profiles/ 2>/dev/null || true
+            cp ${bak}/.env.key .env.key 2>/dev/null || true
+            rm -rf ${bak}
+            chmod +x install.sh scripts/*.sh 2>/dev/null || true
+            echo '✅ Extraction terminée (fichiers sensibles préservés)'"
 
         log_success "Package installé dans ${SSH_PATH}"
 
@@ -1162,20 +1231,21 @@ transfer_via_ssh() {
 
         # Décompresser automatiquement sur le serveur (sans question)
         log_info "Extraction de l'archive sur le serveur..."
+        local bak="/tmp/.sensitive-${PROJECT_NAME}"
 
-        # Extraction simple
-        ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "cd ${SSH_PATH} && \
-            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null && \
-            rm -f ${PROJECT_NAME}.tar.gz && \
-            shopt -s dotglob && \
-            d=\$(find . -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | head -n 2) && \
-            if [ \$(printf '%s\n' \"\$d\" | wc -l) -eq 1 ]; then \
-                mv -f \"\$d\"/* . 2>/dev/null || true; \
-                rmdir \"\$d\" 2>/dev/null || true; \
-            fi && \
-            find . -name '._*' -delete 2>/dev/null || true && \
-            chmod +x install.sh scripts/*.sh 2>/dev/null || true && \
-            echo '✅ Extraction terminée'"
+        ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" "
+            cd ${SSH_PATH}
+            rm -rf ${bak} && mkdir -p ${bak}
+            cp -a scripts/.registry-profiles ${bak}/ 2>/dev/null || true
+            cp .env.key ${bak}/ 2>/dev/null || true
+            tar -xzf ${PROJECT_NAME}.tar.gz 2>/dev/null
+            rm -f ${PROJECT_NAME}.tar.gz
+            find . -name '._*' -delete 2>/dev/null || true
+            cp -a ${bak}/.registry-profiles/. scripts/.registry-profiles/ 2>/dev/null || true
+            cp ${bak}/.env.key .env.key 2>/dev/null || true
+            rm -rf ${bak}
+            chmod +x install.sh scripts/*.sh 2>/dev/null || true
+            echo '✅ Extraction terminée (fichiers sensibles préservés)'"
 
         log_success "Package installé dans ${SSH_PATH}"
     fi
