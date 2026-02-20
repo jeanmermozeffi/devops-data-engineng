@@ -94,8 +94,10 @@ fi
 
 # DEPLOYMENT_DIR relatif au projet
 DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-$PROJECT_ROOT/deployment}"
-# Fallback: package minimal (fichiers à la racine)
-if [ ! -d "$DEPLOYMENT_DIR" ] && [ -f "$PROJECT_ROOT/.env.registry" ]; then
+# Fallback: package minimal (docker-compose files à la racine du projet).
+# On vérifie la présence de docker-compose.registry.yml plutôt que l'existence
+# du dossier deployment/ (qui peut exister pour monitoring sans contenir les composes).
+if [ ! -f "$DEPLOYMENT_DIR/docker-compose.registry.yml" ] && [ -f "$PROJECT_ROOT/docker-compose.registry.yml" ]; then
     DEPLOYMENT_DIR="$PROJECT_ROOT"
 fi
 
@@ -189,6 +191,7 @@ load_encrypted_profile() {
 
 # Charger uniquement les credentials depuis un fichier de profil
 # Ne PAS écraser les valeurs de .devops.yml (REGISTRY_URL, REGISTRY_USERNAME, IMAGE_NAME, etc.)
+# Si .devops.yml est absent (serveur minimal), charger aussi les vars projet depuis le profil.
 load_credentials_from_file() {
     local profile_file=$1
 
@@ -196,17 +199,44 @@ load_credentials_from_file() {
         return 1
     fi
 
-    # Charger UNIQUEMENT les credentials REGISTRY
-    # GITHUB_TOKEN vient de .devops.yml (spécifique au projet Git)
-    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    # Charger les credentials REGISTRY
+    local temp_type temp_token temp_password
+    temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
 
-    # Appliquer les credentials REGISTRY uniquement
     [ -n "$temp_type" ] && REGISTRY_TYPE="$temp_type"
     [ -n "$temp_token" ] && REGISTRY_TOKEN="$temp_token"
     [ -n "$temp_password" ] && REGISTRY_PASSWORD="$temp_password"
     # Note: GITHUB_TOKEN n'est PAS chargé depuis le profil (vient de .devops.yml)
+
+    # Si les vars projet sont absentes (pas de .devops.yml sur serveur minimal),
+    # les charger depuis le profil sans écraser les valeurs existantes.
+    if [ -z "$REGISTRY_URL" ]; then
+        local v
+        v=$(grep "^REGISTRY_URL=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$v" ] && REGISTRY_URL="$v"
+    fi
+    if [ -z "$REGISTRY_USERNAME" ]; then
+        local v
+        v=$(grep "^REGISTRY_USERNAME=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$v" ] && REGISTRY_USERNAME="$v"
+    fi
+    if [ -z "$IMAGE_NAME" ]; then
+        local v
+        v=$(grep "^IMAGE_NAME=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$v" ] && IMAGE_NAME="$v"
+    fi
+    if [ -z "$PROJECT_NAME" ]; then
+        local v
+        v=$(grep "^PROJECT_NAME=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$v" ] && PROJECT_NAME="$v"
+    fi
+    if [ -z "$COMPOSE_PROJECT_NAME" ]; then
+        local v
+        v=$(grep "^COMPOSE_PROJECT_NAME=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+        [ -n "$v" ] && COMPOSE_PROJECT_NAME="$v"
+    fi
 
     return 0
 }
@@ -232,6 +262,39 @@ load_profile() {
             CURRENT_PROFILE="$last_profile"
             log_info "Profil registry chargé: $CURRENT_PROFILE" >&2
             return 0
+        fi
+    fi
+
+    # Fallback: pas de fichier .current mais des profils existent → auto-sélectionner le premier
+    if [ -d "$PROFILES_DIR" ]; then
+        local auto_profile=""
+        for file in "$PROFILES_DIR"/*.env.encrypted "$PROFILES_DIR"/*.env; do
+            if [ -f "$file" ]; then
+                local fname
+                fname=$(basename "$file" .env.encrypted)
+                fname=$(basename "$fname" .env)
+                auto_profile="$fname"
+                break
+            fi
+        done
+
+        if [ -n "$auto_profile" ]; then
+            log_warn "Aucun profil courant défini, utilisation automatique de: $auto_profile" >&2
+            log_info "Pour changer de profil: ./registry.sh profile use <nom>" >&2
+            echo "$auto_profile" > "$LAST_PROFILE_FILE"
+            if [ -f "$PROFILES_DIR/${auto_profile}.env.encrypted" ]; then
+                if load_encrypted_profile "$auto_profile"; then
+                    CURRENT_PROFILE="$auto_profile"
+                    log_info "Profil registry chiffré chargé: $CURRENT_PROFILE" >&2
+                    return 0
+                fi
+            fi
+            if [ -f "$PROFILES_DIR/${auto_profile}.env" ]; then
+                load_credentials_from_file "$PROFILES_DIR/${auto_profile}.env"
+                CURRENT_PROFILE="$auto_profile"
+                log_info "Profil registry chargé: $CURRENT_PROFILE" >&2
+                return 0
+            fi
         fi
     fi
 
@@ -279,8 +342,8 @@ load_profile() {
 
     # Aucun profil trouvé - Vérifier si .devops.yml a les infos nécessaires
     if [ -n "$REGISTRY_USERNAME" ] && [ -n "$IMAGE_NAME" ]; then
-        log_warn "Aucun profil trouvé, mais configuration projet disponible depuis .devops.yml" >&2
-        log_info "Créez un profil pour stocker vos credentials: ./registry.sh profile create" >&2
+        log_info "Configuration projet chargée depuis .devops.yml (pas de profil credentials local)" >&2
+        log_info "Pour sauvegarder vos tokens: ./registry.sh profile create" >&2
         CURRENT_PROFILE=""
         return 0
     fi
@@ -316,9 +379,6 @@ load_profile() {
     log_info "Créez un profil avec: cd $SCRIPT_DIR && ./registry.sh profile create" >&2
     return 1
 }
-
-# Charger le profil
-load_profile || exit 1
 
 # ============================================================================
 # FONCTIONS UTILITAIRES
@@ -539,7 +599,7 @@ get_compose_files() {
     # Déterminer le chemin du fichier .env selon le mode de déploiement:
     # - Mode développement (structure complète): ../..env.${env} (depuis deployment/compose/)
     # - Mode package minimal (fichiers à la racine): ./.env.${env}
-    local env_file_path
+    local env_file_path env_file_flag=""
     if [ "$DEPLOYMENT_DIR" = "$PROJECT_ROOT" ]; then
         # Package minimal: tous les fichiers sont à la racine
         env_file_path="./.env.${env}"
@@ -548,7 +608,14 @@ get_compose_files() {
         env_file_path="../.env.${env}"
     fi
 
-    echo "--env-file ${env_file_path} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
+    # N'inclure --env-file que si le fichier existe.
+    # Pour logs/status/stop/restart les vars sont déjà exportées via export_compose_vars ;
+    # pour deploy, le fichier est préparé explicitement avant cet appel.
+    if [ -f "$env_file_path" ]; then
+        env_file_flag="--env-file ${env_file_path}"
+    fi
+
+    echo "$env_file_flag -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
 }
 
 # ============================================================================
@@ -1529,7 +1596,7 @@ interactive_menu() {
                 env=$(choose_environment)
                 if [ $? -eq 0 ]; then
                     echo ""
-                    cmd_status "$env"
+                    cmd_status "$env" || true
                     echo ""
                     read -p "Appuyez sur Entrée pour revenir au menu principal..."
                 fi
@@ -1552,14 +1619,18 @@ interactive_menu() {
                     echo ""
                     log_info "Appuyez sur Ctrl+C pour revenir au menu principal"
                     sleep 2
-                    cmd_logs "$env" "$service"
+                    # || true : évite que set -e quitte le script sur Ctrl+C (exit 130)
+                    # ou si le conteneur n'existe pas encore
+                    cmd_logs "$env" "$service" || true
+                    echo ""
+                    read -p "Appuyez sur Entrée pour revenir au menu principal..."
                 fi
                 ;;
             5)
                 env=$(choose_environment)
                 if [ $? -eq 0 ]; then
                     echo ""
-                    cmd_restart "$env"
+                    cmd_restart "$env" || true
                     echo ""
                     read -p "Appuyez sur Entrée pour revenir au menu principal..."
                 fi
@@ -1570,7 +1641,7 @@ interactive_menu() {
                     echo ""
                     read -p "Confirmer l'arrêt de l'environnement $env? (yes/n): " confirm
                     if [ "$confirm" == "yes" ]; then
-                        cmd_stop "$env"
+                        cmd_stop "$env" || true
                     else
                         log_info "Arrêt annulé"
                     fi
@@ -1586,7 +1657,7 @@ interactive_menu() {
                     if [ $? -eq 0 ]; then
                         echo ""
                         print_separator
-                        cmd_pull "$env" "$tag"
+                        cmd_pull "$env" "$tag" || true
                         echo ""
                         read -p "Appuyez sur Entrée pour revenir au menu principal..."
                     fi
@@ -2104,6 +2175,9 @@ show_help() {
 # ============================================================================
 # POINT D'ENTRÉE
 # ============================================================================
+
+# Charger le profil (ici, toutes les fonctions sont définies)
+load_profile || exit 1
 
 # Si aucun argument, lancer le mode interactif
 if [ $# -eq 0 ]; then
