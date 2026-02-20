@@ -243,6 +243,26 @@ load_credentials_from_file() {
 
 # Charger le dernier profil utilisé si disponible
 load_profile() {
+    # Pré-charger les vars de configuration app depuis .env.registry si elles ne sont pas
+    # encore définies (typiquement sur un serveur sans .devops.yml).
+    # .env.registry contient APP_ENTRYPOINT, APP_PYTHON_PATH, WORKDIR, etc. générés
+    # lors de la création du package.
+    local _reg
+    for _reg in "$PROJECT_ROOT/.env.registry" "$SCRIPT_DIR/../.env.registry"; do
+        if [ -f "$_reg" ]; then
+            for _v in APP_ENTRYPOINT APP_PYTHON_PATH APP_SOURCE_DIR APP_DEST_DIR WORKDIR \
+                      PROJECT_NAME COMPOSE_PROJECT_NAME IMAGE_NAME REGISTRY_URL REGISTRY_USERNAME REGISTRY_TYPE; do
+                if [ -z "${!_v}" ]; then
+                    local _val
+                    _val=$(grep "^${_v}=" "$_reg" 2>/dev/null | cut -d'=' -f2)
+                    [ -n "$_val" ] && export "${_v}=${_val}"
+                fi
+            done
+            break
+        fi
+    done
+    unset _reg _v _val
+
     # Essayer de charger depuis le fichier .current
     if [ -f "$LAST_PROFILE_FILE" ]; then
         local last_profile=$(cat "$LAST_PROFILE_FILE")
@@ -1606,12 +1626,12 @@ interactive_menu() {
                 if [ $? -eq 0 ]; then
                     echo ""
                     echo -e "${CYAN}Service:${NC}"
-                    echo "  1) ${IMAGE_NAME:-api}"
+                    echo "  1) api"
                     echo "  2) redis"
                     echo ""
-                    read -p "Choisissez le service (1-2, défaut: ${IMAGE_NAME:-api}): " service_choice
+                    read -p "Choisissez le service (1-2, défaut: api): " service_choice
 
-                    service="${IMAGE_NAME:-api}"
+                    service="api"
                     case "$service_choice" in
                         2) service="redis" ;;
                     esac
@@ -1965,6 +1985,16 @@ cmd_deploy() {
         docker pull "$image_full"
     fi
 
+    # Créer les fichiers bind-montés s'ils n'existent pas encore (évite que Docker les crée comme répertoires)
+    for _bind_file in "$PROJECT_ROOT/.env.key" "$PROJECT_ROOT/.env.${env}.encrypted"; do
+        if [ -d "$_bind_file" ]; then
+            log_warn "Suppression du répertoire '$_bind_file' (créé incorrectement par Docker)"
+            rm -rf "$_bind_file"
+        fi
+        [ ! -f "$_bind_file" ] && touch "$_bind_file"
+    done
+    unset _bind_file
+
     # Démarrer les services
     log_info "Démarrage des services..."
     if [ "${STACK_TYPE}" = "monitoring" ]; then
@@ -2028,6 +2058,9 @@ export_compose_vars() {
     export APP_PYTHON_PATH="${APP_PYTHON_PATH}"
     export WORKDIR="${WORKDIR}"
 
+    # IMAGE_TAG : si non défini (pas de déploiement préalable), utiliser le dernier tag de l'env
+    export IMAGE_TAG="${IMAGE_TAG:-latest}"
+
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
 }
@@ -2047,7 +2080,7 @@ cmd_status() {
 # Afficher les logs
 cmd_logs() {
     local env=$1
-    local service=${2:-${IMAGE_NAME:-api}}
+    local service=${2:-api}
 
     export_compose_vars "$env"
 
