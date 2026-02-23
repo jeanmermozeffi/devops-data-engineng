@@ -317,6 +317,12 @@ load_devops_config() {
     fi
     [ -n "$nested_value" ] && { GIT_REPO="$nested_value"; export GIT_REPO; }
 
+    nested_value=$(get_nested_yaml_value "git" "github_token" "$config_file")
+    [ -n "$nested_value" ] && { GITHUB_TOKEN="$nested_value"; export GITHUB_TOKEN; }
+
+    nested_value=$(get_nested_yaml_value "git" "git_username" "$config_file")
+    [ -n "$nested_value" ] && { GIT_USERNAME="$nested_value"; export GIT_USERNAME; }
+
     nested_value=$(get_nested_yaml_value "git" "dev_branch" "$config_file")
     [ -n "$nested_value" ] && { DEV_BRANCH="$nested_value"; export DEV_BRANCH; }
 
