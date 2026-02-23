@@ -23,6 +23,15 @@ log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 
 ISSUES_FOUND=0
 
+# Charger la configuration projet (.devops.yml) via loader central
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config-loader.sh"
+load_devops_config || true
+if [ -n "$PROJECT_ROOT" ]; then
+    cd "$PROJECT_ROOT"
+fi
+IMAGE_NAME_FILTER="${IMAGE_NAME:-${PROJECT_NAME:-$(basename "$(pwd)")}}"
+
 echo -e "${CYAN}╔════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║  Audit de sécurité - Secrets et .env              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════╝${NC}"
@@ -79,11 +88,11 @@ echo ""
 
 # Test 5: Vérifier les images Docker locales
 echo -e "${CYAN}Test 5: Vérification des images Docker locales${NC}"
-if docker images | grep -q "${IMAGE_NAME:-api}"; then
+if docker images | grep -q "$IMAGE_NAME_FILTER"; then
     log_info "Images Docker locales trouvées, vérification..."
 
     # Prendre la première image
-    IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "${IMAGE_NAME:-api}" | head -n1)
+    IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "$IMAGE_NAME_FILTER" | head -n1)
 
     if [ -n "$IMAGE" ]; then
         log_info "Test de l'image: $IMAGE"
@@ -176,4 +185,3 @@ else
     echo ""
     exit 1
 fi
-

@@ -20,7 +20,7 @@
 #   ./deploy-registry.sh deploy dev dev-v20251216-163525-3be7822
 #   ./deploy-registry.sh deploy prod prod-latest
 #   ./deploy-registry.sh list-tags dev
-#   ./deploy-registry.sh logs dev ${IMAGE_NAME:-api}
+#   ./deploy-registry.sh logs dev <service>
 #
 # ============================================================================
 
@@ -101,6 +101,7 @@ fi
 
 # Se placer dans le répertoire du projet
 cd "$PROJECT_ROOT"
+DEFAULT_PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
 
 # Debug: afficher les chemins au démarrage (décommentez pour diagnostiquer)
 # echo "DEBUG: SCRIPT_DIR=$SCRIPT_DIR" >&2
@@ -108,7 +109,7 @@ cd "$PROJECT_ROOT"
 # echo "DEBUG: PROJECT_ROOT=$PROJECT_ROOT" >&2
 
 # Nom du projet Docker Compose (chargé depuis .devops.yml ou fallback)
-export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
 
 # Dossier des profils registry (partagé avec registry.sh)
 PROFILES_DIR="$SCRIPT_DIR/.registry-profiles"
@@ -169,21 +170,23 @@ load_encrypted_profile() {
         python_cmd="$DEPLOYMENT_DIR/../.venv/bin/python3"
     fi
 
-    # Déchiffrer le profil dans un fichier temporaire
-    local temp_file="/tmp/.registry-profile-$$"
-    if $python_cmd "$encrypt_script" decrypt "$encrypted_file" >/dev/null 2>&1; then
-        # Le fichier déchiffré est créé sans .encrypted
-        local decrypted_file="$PROFILES_DIR/${profile_name}.env"
-        if [ -f "$decrypted_file" ]; then
-            # Charger les variables
-            source "$decrypted_file"
-            # Supprimer le fichier déchiffré temporaire
-            rm -f "$decrypted_file"
-            return 0
-        fi
+    if ! "$python_cmd" -c "import cryptography" >/dev/null 2>&1; then
+        log_error "Le module Python 'cryptography' est requis pour charger les profils chiffrés"
+        log_info "Installez-le avec: $python_cmd -m pip install -r \"$SCRIPT_DIR/../requirements-encryption.txt\""
+        return 1
     fi
 
-    rm -f "$temp_file"
+    local temp_decrypted
+    temp_decrypted=$(mktemp "/tmp/registry-profile-${profile_name}.XXXXXX")
+
+    if "$python_cmd" "$encrypt_script" decrypt "$encrypted_file" "$temp_decrypted" >/dev/null 2>&1; then
+        load_credentials_from_file "$temp_decrypted"
+        rm -f "$temp_decrypted"
+        return 0
+    fi
+
+    rm -f "$temp_decrypted"
+    log_error "Impossible de déchiffrer le profil '$profile_name'"
     return 1
 }
 
@@ -198,40 +201,82 @@ load_credentials_from_file() {
 
     # Charger UNIQUEMENT les credentials REGISTRY
     # GITHUB_TOKEN vient de .devops.yml (spécifique au projet Git)
-    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
+    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_github_token=$(grep "^GITHUB_TOKEN=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+
+    temp_type=$(echo "$temp_type" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_token=$(echo "$temp_token" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_password=$(echo "$temp_password" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_github_token=$(echo "$temp_github_token" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 
     # Appliquer les credentials REGISTRY uniquement
     [ -n "$temp_type" ] && REGISTRY_TYPE="$temp_type"
     [ -n "$temp_token" ] && REGISTRY_TOKEN="$temp_token"
     [ -n "$temp_password" ] && REGISTRY_PASSWORD="$temp_password"
-    # Note: GITHUB_TOKEN n'est PAS chargé depuis le profil (vient de .devops.yml)
+    # Garder la priorité à .devops.yml; fallback profil seulement si variable absente
+    [ -z "$GITHUB_TOKEN" ] && [ -n "$temp_github_token" ] && GITHUB_TOKEN="$temp_github_token"
 
     return 0
 }
 
+# Charger un profil par son nom (clair/chiffré) et l'appliquer au process courant
+load_profile_by_name() {
+    local profile_name=$1
+    local profile_file="$PROFILES_DIR/${profile_name}.env"
+    local encrypted_file="$PROFILES_DIR/${profile_name}.env.encrypted"
+
+    if [ -f "$profile_file" ]; then
+        load_credentials_from_file "$profile_file"
+        return 0
+    fi
+
+    if [ -f "$encrypted_file" ]; then
+        if load_encrypted_profile "$profile_name"; then
+            return 0
+        fi
+        return 1
+    fi
+
+    return 1
+}
+
 # Charger le dernier profil utilisé si disponible
 load_profile() {
+    local tried_profile=""
+    local found_profile_reference=false
+
     # Essayer de charger depuis le fichier .current
     if [ -f "$LAST_PROFILE_FILE" ]; then
         local last_profile=$(cat "$LAST_PROFILE_FILE")
+        tried_profile="$last_profile"
+        found_profile_reference=true
 
-        # Essayer d'abord de charger un profil chiffré
-        if [ -f "$PROFILES_DIR/${last_profile}.env.encrypted" ]; then
-            if load_encrypted_profile "$last_profile"; then
-                CURRENT_PROFILE="$last_profile"
-                log_info "Profil registry chiffré chargé: $CURRENT_PROFILE" >&2
-                return 0
-            fi
-        fi
-
-        # Sinon, essayer le profil non chiffré (charger uniquement credentials)
-        if [ -f "$PROFILES_DIR/${last_profile}.env" ]; then
-            load_credentials_from_file "$PROFILES_DIR/${last_profile}.env"
+        if load_profile_by_name "$last_profile"; then
             CURRENT_PROFILE="$last_profile"
             log_info "Profil registry chargé: $CURRENT_PROFILE" >&2
             return 0
+        fi
+
+        log_warn "Impossible de charger le profil '$last_profile' depuis .current" >&2
+    fi
+
+    # Fallback de compatibilité: charger depuis .last
+    local last_file_compat="$PROFILES_DIR/.last"
+    if [ -f "$last_file_compat" ]; then
+        local last_profile_compat=$(cat "$last_file_compat")
+        found_profile_reference=true
+
+        # Éviter une double tentative si .current et .last pointent sur le même profil
+        if [ "$last_profile_compat" != "$tried_profile" ]; then
+            if load_profile_by_name "$last_profile_compat"; then
+                CURRENT_PROFILE="$last_profile_compat"
+                log_info "Profil registry chargé: $CURRENT_PROFILE" >&2
+                return 0
+            fi
+
+            log_warn "Impossible de charger le profil '$last_profile_compat' depuis .last" >&2
         fi
     fi
 
@@ -279,7 +324,11 @@ load_profile() {
 
     # Aucun profil trouvé - Vérifier si .devops.yml a les infos nécessaires
     if [ -n "$REGISTRY_USERNAME" ] && [ -n "$IMAGE_NAME" ]; then
-        log_warn "Aucun profil trouvé, mais configuration projet disponible depuis .devops.yml" >&2
+        if [ "$found_profile_reference" = true ]; then
+            log_warn "Profil détecté mais non chargeable, utilisation de la configuration projet (.devops.yml)" >&2
+        else
+            log_warn "Aucun profil trouvé, mais configuration projet disponible depuis .devops.yml" >&2
+        fi
         log_info "Créez un profil pour stocker vos credentials: ./registry.sh profile create" >&2
         CURRENT_PROFILE=""
         return 0
@@ -421,6 +470,19 @@ get_env_file() {
     fi
 
     return 1
+}
+
+# Construire le chemin env_file à injecter dans docker-compose.registry.yml
+# - Projet standard: exécution depuis deployment/ -> ../.env.<env>
+# - Package minimal: exécution à la racine      -> .env.<env>
+get_compose_env_file_path() {
+    local env=$1
+
+    if [ "$DEPLOYMENT_DIR" = "$PROJECT_ROOT" ]; then
+        echo ".env.$env"
+    else
+        echo "../.env.$env"
+    fi
 }
 
 # Nettoyer les fichiers temporaires
@@ -1045,8 +1107,15 @@ EOF
     # Demander si on veut l'utiliser
     read -p "Utiliser ce profil maintenant? (y/N): " use_now
     if [[ "$use_now" =~ ^[Yy]$ ]]; then
-        echo "$profile_name" > "$LAST_PROFILE_FILE"
-        log_success "Profil '$profile_name' activé"
+        if load_profile_by_name "$profile_name"; then
+            CURRENT_PROFILE="$profile_name"
+            mkdir -p "$PROFILES_DIR"
+            echo "$profile_name" > "$LAST_PROFILE_FILE"
+            echo "$profile_name" > "$PROFILES_DIR/.last"
+            log_success "Profil '$profile_name' chargé et activé"
+        else
+            log_warn "Profil créé mais impossible à charger immédiatement"
+        fi
     fi
 }
 
@@ -1098,10 +1167,20 @@ switch_profile() {
         return 1
     fi
 
+    if ! load_profile_by_name "$profile_name"; then
+        log_error "Impossible de charger le profil '$profile_name'"
+        return 1
+    fi
+
+    CURRENT_PROFILE="$profile_name"
+    mkdir -p "$PROFILES_DIR"
     echo "$profile_name" > "$LAST_PROFILE_FILE"
-    log_success "Profil '$profile_name' activé"
-    log_info "Redémarrez le script pour utiliser ce profil"
-    exit 0
+    echo "$profile_name" > "$PROFILES_DIR/.last"
+
+    log_success "Profil '$profile_name' chargé et activé"
+    log_info "Type: $(get_registry_description "$REGISTRY_TYPE")"
+    log_info "Projet: ${REGISTRY_USERNAME:-non défini}/${IMAGE_NAME:-non défini} (depuis .devops.yml)"
+    return 0
 }
 
 # Supprimer un profil
@@ -1539,12 +1618,12 @@ interactive_menu() {
                 if [ $? -eq 0 ]; then
                     echo ""
                     echo -e "${CYAN}Service:${NC}"
-                    echo "  1) ${IMAGE_NAME:-api}"
+                    echo "  1) ${IMAGE_NAME:-$DEFAULT_PROJECT_NAME}"
                     echo "  2) redis"
                     echo ""
-                    read -p "Choisissez le service (1-2, défaut: ${IMAGE_NAME:-api}): " service_choice
+                    read -p "Choisissez le service (1-2, défaut: ${IMAGE_NAME:-$DEFAULT_PROJECT_NAME}): " service_choice
 
-                    service="${IMAGE_NAME:-api}"
+                    service="${IMAGE_NAME:-$DEFAULT_PROJECT_NAME}"
                     case "$service_choice" in
                         2) service="redis" ;;
                     esac
@@ -1764,7 +1843,7 @@ cmd_deploy() {
     image_tag_for_compose=$(resolve_compose_image_tag "$env" "$tag")
     export IMAGE_TAG=$image_tag_for_compose
     export IMAGE_FULL=$image_full
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}-${env}"
 
     # Exporter les variables de .devops.yml pour docker-compose
     export PROJECT_NAME="${PROJECT_NAME}"
@@ -1778,8 +1857,8 @@ cmd_deploy() {
     export WORKDIR="${WORKDIR}"
 
     # Exporter le chemin du fichier .env pour docker-compose
-    # Sur le serveur déployé (sans deployment/), le fichier est dans le répertoire courant
-    export ENV_FILE_PATH=".env.$env"
+    export ENV_FILE_PATH
+    ENV_FILE_PATH="$(get_compose_env_file_path "$env")"
 
     # Exporter les chemins pour les volumes (clé et fichier chiffré)
     export ENV_KEY_PATH="$PROJECT_ROOT/.env.key"
@@ -1839,7 +1918,7 @@ cmd_deploy() {
     cd "$DEPLOYMENT_DIR"
 
     # Uniformiser le nom de projet Compose (local + registry)
-    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
+    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
     if [[ "$base_compose_name" == *"-${env}" ]]; then
         export COMPOSE_PROJECT_NAME="$base_compose_name"
     else
@@ -1950,12 +2029,14 @@ export_compose_vars() {
     export REGISTRY_URL="${REGISTRY_URL}"
     export REGISTRY_USERNAME="${REGISTRY_USERNAME}"
     export IMAGE_NAME="${IMAGE_NAME}"
-    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-app}-${env}"
+    export COMPOSE_PROJECT_NAME="${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}-${env}"
     export APP_SOURCE_DIR="${APP_SOURCE_DIR}"
     export APP_DEST_DIR="${APP_DEST_DIR}"
     export APP_ENTRYPOINT="${APP_ENTRYPOINT}"
     export APP_PYTHON_PATH="${APP_PYTHON_PATH}"
     export WORKDIR="${WORKDIR}"
+    export ENV_FILE_PATH
+    ENV_FILE_PATH="$(get_compose_env_file_path "$env")"
 
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
@@ -1976,7 +2057,7 @@ cmd_status() {
 # Afficher les logs
 cmd_logs() {
     local env=$1
-    local service=${2:-${IMAGE_NAME:-api}}
+    local service=${2:-${IMAGE_NAME:-$DEFAULT_PROJECT_NAME}}
 
     export_compose_vars "$env"
 
@@ -2052,7 +2133,7 @@ show_help() {
     echo -e "${WHITE}Gestion:${NC}"
     echo "    list-tags <env>           Lister les tags disponibles dans le registry"
     echo "    status <env>              Afficher le statut des conteneurs"
-    echo "    logs <env> [service]      Voir les logs (défaut: ${IMAGE_NAME:-api})"
+    echo "    logs <env> [service]      Voir les logs (défaut: ${IMAGE_NAME:-$DEFAULT_PROJECT_NAME})"
     echo "    stop <env>                Arrêter les services"
     echo "    restart <env>             Redémarrer les services"
     echo "    superset-import <env>     Importer les assets Superset (dashboards, charts, etc.)"
@@ -2076,7 +2157,7 @@ show_help() {
     echo ""
     echo -e "    ${WHITE}Voir les logs:${NC}"
     echo "    $0 logs dev"
-    echo "    $0 logs prod ${IMAGE_NAME:-api}"
+    echo "    $0 logs prod ${IMAGE_NAME:-$DEFAULT_PROJECT_NAME}"
     echo "    $0 logs dev redis"
     echo ""
     echo -e "    ${WHITE}Gestion des services:${NC}"

@@ -53,6 +53,38 @@ print_separator() {
     echo -e "${CYAN}----------------------------------------${NC}"
 }
 
+normalize_git_repo_for_build() {
+    local repo="$1"
+    repo=$(echo "$repo" | xargs)
+    [ -z "$repo" ] && { echo ""; return 0; }
+
+    # Alias SSH vers GitHub (ex: git@github.com-cicbi:org/repo.git)
+    if echo "$repo" | grep -Eq '^git@github\.com[^:]*:'; then
+        echo "$repo" | sed -E 's|^git@github\.com[^:]*:|https://github.com/|'
+        return 0
+    fi
+
+    if echo "$repo" | grep -Eq '^git@[^:]+:'; then
+        echo "$repo" | sed -E 's|^git@([^:]+):|https://\1/|'
+        return 0
+    fi
+
+    if echo "$repo" | grep -Eq '^ssh://git@[^/]+/.+'; then
+        echo "$repo" | sed -E 's|^ssh://git@([^/]+)/|https://\1/|'
+        return 0
+    fi
+
+    echo "$repo"
+}
+
+resolve_git_repo_for_build() {
+    local repo="${GIT_REPO:-}"
+    if [ -z "$repo" ] && [ -n "$PROJECT_ROOT" ] && command -v git >/dev/null 2>&1; then
+        repo=$(git -C "$PROJECT_ROOT" config --get remote.origin.url 2>/dev/null || true)
+    fi
+    normalize_git_repo_for_build "$repo"
+}
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -251,11 +283,97 @@ EOF
     log_info "Les infos du projet sont lues depuis .devops.yml"
 }
 
+# Lister tous les noms de profils (clairs + chiffrés) sans doublon
+get_profile_names() {
+    local profiles=()
+    local file
+    local name
+
+    for file in "$PROFILES_DIR"/*.env "$PROFILES_DIR"/*.env.encrypted; do
+        [ -f "$file" ] || continue
+
+        name=$(basename "$file")
+        name=${name%.env.encrypted}
+        name=${name%.env}
+
+        if [[ ! " ${profiles[@]} " =~ " ${name} " ]]; then
+            profiles+=("$name")
+        fi
+    done
+
+    printf '%s\n' "${profiles[@]}"
+}
+
+# Charger les credentials REGISTRY depuis un fichier .env
+load_credentials_from_file() {
+    local profile_file=$1
+    [ -f "$profile_file" ] || return 1
+
+    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    local temp_github_token=$(grep "^GITHUB_TOKEN=" "$profile_file" 2>/dev/null | head -1 | cut -d'=' -f2-)
+
+    temp_type=$(echo "$temp_type" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_token=$(echo "$temp_token" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_password=$(echo "$temp_password" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    temp_github_token=$(echo "$temp_github_token" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+
+    [ -n "$temp_type" ] && REGISTRY_TYPE="$temp_type"
+    [ -n "$temp_token" ] && REGISTRY_TOKEN="$temp_token"
+    [ -n "$temp_password" ] && REGISTRY_PASSWORD="$temp_password"
+    [ -z "$GITHUB_TOKEN" ] && [ -n "$temp_github_token" ] && GITHUB_TOKEN="$temp_github_token"
+    return 0
+}
+
+# Déchiffrer et charger un profil chiffré (.env.encrypted)
+load_encrypted_profile() {
+    local profile_name=$1
+    local encrypted_file="$PROFILES_DIR/${profile_name}.env.encrypted"
+    local decrypt_script="$SCRIPT_DIR/env-encrypt.py"
+
+    [ -f "$encrypted_file" ] || return 1
+
+    if [ ! -f "$decrypt_script" ]; then
+        log_error "Script de déchiffrement introuvable: $decrypt_script"
+        return 1
+    fi
+
+    local python_cmd="python3"
+    if [ -f "$PROJECT_ROOT/.venv/bin/python3" ]; then
+        python_cmd="$PROJECT_ROOT/.venv/bin/python3"
+    fi
+
+    if ! "$python_cmd" -c "import cryptography" >/dev/null 2>&1; then
+        log_error "Le module Python 'cryptography' est requis pour charger les profils chiffrés"
+        log_info "Installez-le avec: $python_cmd -m pip install -r \"$SCRIPT_DIR/../requirements-encryption.txt\""
+        return 1
+    fi
+
+    local temp_decrypted
+    temp_decrypted=$(mktemp "/tmp/registry-profile-${profile_name}.XXXXXX")
+
+    if "$python_cmd" "$decrypt_script" decrypt "$encrypted_file" "$temp_decrypted" >/dev/null 2>&1; then
+        load_credentials_from_file "$temp_decrypted"
+        rm -f "$temp_decrypted"
+        return 0
+    fi
+
+    rm -f "$temp_decrypted"
+    return 1
+}
+
 # Lister les profils disponibles
 profile_list() {
     log_header "PROFILS DISPONIBLES"
 
-    if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A $PROFILES_DIR/*.env 2>/dev/null)" ]; then
+    local profiles=()
+    while IFS= read -r pname; do
+        [ -n "$pname" ] || continue
+        profiles+=("$pname")
+    done < <(get_profile_names)
+
+    if [ "${#profiles[@]}" -eq 0 ]; then
         log_warn "Aucun profil trouvé"
         return 0
     fi
@@ -264,19 +382,32 @@ profile_list() {
     echo ""
 
     local current_marker=""
-    for pfile in "$PROFILES_DIR"/*.env; do
-        local pname=$(basename "$pfile" .env)
+    local pname
+    local pfile
+    for pname in "${profiles[@]}"; do
+        pfile="$PROFILES_DIR/${pname}.env"
         if [ "$pname" == "$CURRENT_PROFILE" ]; then
             current_marker=" ${GREEN}(actif)${NC}"
         else
             current_marker=""
         fi
 
-        # Lire le type depuis le profil sans utiliser source
-        local ptype=$(grep "^REGISTRY_TYPE=" "$pfile" 2>/dev/null | cut -d'=' -f2)
+        # Lire le type depuis le profil en clair (sans tenter de déchiffrement ici)
+        local ptype=""
+        if [ -f "$PROFILES_DIR/${pname}.env" ]; then
+            ptype=$(grep "^REGISTRY_TYPE=" "$PROFILES_DIR/${pname}.env" 2>/dev/null | head -1 | cut -d'=' -f2-)
+        fi
+
+        ptype=$(echo "$ptype" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+        local encrypted_marker=""
+        if [ -f "$PROFILES_DIR/${pname}.env.encrypted" ] && [ ! -f "$PROFILES_DIR/${pname}.env" ]; then
+            encrypted_marker=" ${CYAN}[chiffré]${NC}"
+            [ -z "$ptype" ] && ptype="unknown"
+        fi
+
         local has_token=$(grep -q "^REGISTRY_TOKEN=.\+" "$pfile" 2>/dev/null && echo "oui" || echo "non")
 
-        echo -e "  ${CYAN}●${NC} ${WHITE}$pname${NC}$current_marker"
+        echo -e "  ${CYAN}●${NC} ${WHITE}$pname${NC}$current_marker$encrypted_marker"
         echo -e "    Type: $(get_registry_description "$ptype")"
         echo -e "    Token configuré: $has_token"
         echo ""
@@ -291,21 +422,35 @@ profile_load() {
         # Mode interactif - afficher une liste numérotée
         log_header "CHARGER UN PROFIL"
 
-        if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A $PROFILES_DIR/*.env 2>/dev/null)" ]; then
+        local profiles=()
+        while IFS= read -r pname; do
+            [ -n "$pname" ] || continue
+            profiles+=("$pname")
+        done < <(get_profile_names)
+
+        if [ "${#profiles[@]}" -eq 0 ]; then
             log_warn "Aucun profil trouvé"
             return 1
         fi
 
-        local profiles=()
         local i=1
-        for pfile in "$PROFILES_DIR"/*.env; do
-            local pname=$(basename "$pfile" .env)
-            profiles+=("$pname")
+        local pname
+        local ptype
+        for pname in "${profiles[@]}"; do
+            ptype=""
+            if [ -f "$PROFILES_DIR/${pname}.env" ]; then
+                ptype=$(grep "^REGISTRY_TYPE=" "$PROFILES_DIR/${pname}.env" 2>/dev/null | head -1 | cut -d'=' -f2-)
+            fi
+            ptype=$(echo "$ptype" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 
-            # Lire le type de registry depuis le profil (sans source pour ne pas polluer)
-            local ptype=$(grep "^REGISTRY_TYPE=" "$pfile" 2>/dev/null | cut -d'=' -f2)
+            local encrypted_marker=""
+            if [ -f "$PROFILES_DIR/${pname}.env.encrypted" ] && [ ! -f "$PROFILES_DIR/${pname}.env" ]; then
+                encrypted_marker=" ${CYAN}[chiffré]${NC}"
+                [ -z "$ptype" ] && ptype="unknown"
+            fi
+
             printf "  ${CYAN}%d)${NC} ${WHITE}%s${NC}\n" "$i" "$pname"
-            printf "     Type: %s\n" "$(get_registry_description "$ptype")"
+            printf "     Type: %s%s\n" "$(get_registry_description "$ptype")" "$encrypted_marker"
             printf "\n"
             ((i++))
         done
@@ -327,25 +472,19 @@ profile_load() {
     fi
 
     local profile_file="$PROFILES_DIR/${profile_name}.env"
+    local encrypted_file="$PROFILES_DIR/${profile_name}.env.encrypted"
 
-    if [ ! -f "$profile_file" ]; then
+    if [ ! -f "$profile_file" ] && [ ! -f "$encrypted_file" ]; then
         log_error "Profil '$profile_name' introuvable"
         return 1
     fi
 
-    # Charger UNIQUEMENT les credentials REGISTRY depuis le profil
-    # GITHUB_TOKEN vient de .devops.yml (spécifique au projet Git)
-    # Les autres valeurs (REGISTRY_URL, REGISTRY_USERNAME, IMAGE_NAME, etc.)
-    # viennent aussi de .devops.yml et ne doivent PAS être écrasées
-    local temp_type=$(grep "^REGISTRY_TYPE=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_token=$(grep "^REGISTRY_TOKEN=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-    local temp_password=$(grep "^REGISTRY_PASSWORD=" "$profile_file" 2>/dev/null | cut -d'=' -f2)
-
-    # Appliquer les credentials REGISTRY uniquement
-    [ -n "$temp_type" ] && REGISTRY_TYPE="$temp_type"
-    [ -n "$temp_token" ] && REGISTRY_TOKEN="$temp_token"
-    [ -n "$temp_password" ] && REGISTRY_PASSWORD="$temp_password"
-    # Note: GITHUB_TOKEN n'est PAS chargé depuis le profil (vient de .devops.yml)
+    if [ -f "$profile_file" ]; then
+        load_credentials_from_file "$profile_file"
+    elif ! load_encrypted_profile "$profile_name"; then
+        log_error "Impossible de déchiffrer le profil '$profile_name'"
+        return 1
+    fi
 
     CURRENT_PROFILE="$profile_name"
 
@@ -361,19 +500,27 @@ profile_delete() {
     if [ -z "$profile_name" ]; then
         log_header "SUPPRIMER UN PROFIL"
 
-        if [ ! -d "$PROFILES_DIR" ] || [ -z "$(ls -A $PROFILES_DIR/*.env 2>/dev/null)" ]; then
+        local profiles=()
+        while IFS= read -r pname; do
+            [ -n "$pname" ] || continue
+            profiles+=("$pname")
+        done < <(get_profile_names)
+
+        if [ "${#profiles[@]}" -eq 0 ]; then
             log_warn "Aucun profil trouvé"
             return 1
         fi
 
-        local profiles=()
         local i=1
-        for profile_file in "$PROFILES_DIR"/*.env; do
-            local pname=$(basename "$profile_file" .env)
-            profiles+=("$pname")
-
-            # Charger le profil pour afficher les détails
-            source "$profile_file"
+        local profile_file
+        local pname
+        for pname in "${profiles[@]}"; do
+            profile_file="$PROFILES_DIR/${pname}.env"
+            if [ -f "$profile_file" ]; then
+                load_credentials_from_file "$profile_file"
+            else
+                load_encrypted_profile "$pname" >/dev/null 2>&1 || true
+            fi
             printf "  ${CYAN}%d)${NC} ${WHITE}%s${NC}\n" "$i" "$pname"
             printf "     Registry: %s\n" "$(get_registry_description "$REGISTRY_TYPE")"
             printf "\n"
@@ -397,8 +544,9 @@ profile_delete() {
     fi
 
     local profile_file="$PROFILES_DIR/${profile_name}.env"
+    local encrypted_file="$PROFILES_DIR/${profile_name}.env.encrypted"
 
-    if [ ! -f "$profile_file" ]; then
+    if [ ! -f "$profile_file" ] && [ ! -f "$encrypted_file" ]; then
         log_error "Profil '$profile_name' introuvable"
         return 1
     fi
@@ -409,7 +557,7 @@ profile_delete() {
         return 0
     fi
 
-    rm "$profile_file"
+    rm -f "$profile_file" "$encrypted_file"
     log_success "Profil '$profile_name' supprimé"
 }
 
@@ -457,7 +605,16 @@ load_config() {
     local last_profile_file="$PROFILES_DIR/.last"
     if [ -f "$last_profile_file" ]; then
         local last_profile=$(cat "$last_profile_file")
-        if profile_load "$last_profile" 2>/dev/null; then
+        if PROFILE_LOAD_QUIET=true profile_load "$last_profile" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    # Fallback de compatibilité: certains scripts utilisent .current
+    local current_profile_file="$PROFILES_DIR/.current"
+    if [ -f "$current_profile_file" ]; then
+        local current_profile=$(cat "$current_profile_file")
+        if PROFILE_LOAD_QUIET=true profile_load "$current_profile" >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -477,6 +634,7 @@ load_config() {
 save_last_profile() {
     if [ -n "$CURRENT_PROFILE" ]; then
         echo "$CURRENT_PROFILE" > "$PROFILES_DIR/.last"
+        echo "$CURRENT_PROFILE" > "$PROFILES_DIR/.current"
     fi
 }
 
@@ -876,10 +1034,17 @@ cmd_build() {
     fi
 
     # Arguments de build
-    # Normaliser GIT_REPO pour éviter les formats SSH dans le Dockerfile (git@host:org/repo.git)
-    local git_repo_build="$GIT_REPO"
-    if echo "$git_repo_build" | grep -q "^git@"; then
-        git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
+    local git_repo_build=""
+    if [ "$use_git" == "true" ]; then
+        git_repo_build=$(resolve_git_repo_for_build)
+        if [ -z "$git_repo_build" ]; then
+            log_error "GIT_REPO non défini et remote.origin introuvable"
+            log_info "Ajoutez git_repo (format HTTPS) dans .devops.yml ou configurez 'git remote origin'"
+            return 1
+        fi
+        if [ -z "$GITHUB_TOKEN" ]; then
+            log_warn "GITHUB_TOKEN non défini: clone Git anonyme (OK repo public, KO repo privé)"
+        fi
     fi
     local app_source_dir="${APP_SOURCE_DIR:-app}"
     local app_dest_dir="${APP_DEST_DIR:-app}"
@@ -1093,9 +1258,17 @@ cmd_build_push_multiarch() {
     fi
 
     # Arguments de build
-    local git_repo_build="$GIT_REPO"
-    if echo "$git_repo_build" | grep -q "^git@"; then
-        git_repo_build=$(echo "$git_repo_build" | sed -E 's|^git@([^:]+):|https://\1/|')
+    local git_repo_build=""
+    if [ "$use_git" == "true" ]; then
+        git_repo_build=$(resolve_git_repo_for_build)
+        if [ -z "$git_repo_build" ]; then
+            log_error "GIT_REPO non défini et remote.origin introuvable"
+            log_info "Ajoutez git_repo (format HTTPS) dans .devops.yml ou configurez 'git remote origin'"
+            return 1
+        fi
+        if [ -z "$GITHUB_TOKEN" ]; then
+            log_warn "GITHUB_TOKEN non défini: clone Git anonyme (OK repo public, KO repo privé)"
+        fi
     fi
     local app_source_dir="${APP_SOURCE_DIR:-app}"
     local app_dest_dir="${APP_DEST_DIR:-app}"

@@ -34,6 +34,7 @@ if [ -z "$PROJECT_ROOT" ]; then
 fi
 
 cd "$PROJECT_ROOT"
+DEFAULT_PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
 
 # COMPOSE_PROJECT_NAME est maintenant chargé depuis .devops.yml
 # Pas de valeur par défaut - utilise celle de config-loader.sh
@@ -488,7 +489,7 @@ cmd_deploy() {
     fi
 
     log_header "DÉPLOIEMENT - Environnement: $env"
-    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-app}}"
+    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
     if [[ "$base_compose_name" == *"-${env}" ]]; then
         export COMPOSE_PROJECT_NAME="$base_compose_name"
     else
@@ -925,7 +926,7 @@ cmd_rebuild() {
 cmd_clean() {
     local env=$1
     local deep=${2:-false}
-    local project="${PROJECT_NAME:-app}"
+    local project="${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}"
 
     log_header "NETTOYAGE - Projet: $project"
 

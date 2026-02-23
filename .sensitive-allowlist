@@ -1,0 +1,13 @@
+# Allowlist pour la détection de contenu sensible
+# Format:
+#   - Lignes vides et commentaires (#) ignorés
+#   - Par défaut, chaque ligne est un pattern "path:"
+#   - Utilisez "pattern:" pour ignorer des regex de contenu
+
+# Ignorer certains chemins (regex)
+path:^app/src/security/
+path:^app/src/main\.py$
+
+# Ignorer certains patterns de contenu (regex)
+pattern:^token\s*=\s*".*"
+pattern:^password\s*=\s*"changeme"

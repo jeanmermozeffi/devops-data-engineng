@@ -22,6 +22,8 @@ sensitive_patterns:
   # Variables spécifiques (nom exact)
   - DATABASE_PASSWORD
   - DATABASE_USER  # Optionnel: peut aussi être sensible
+  - DBZ_DATABASE_PASS
+  - DBZ_DATABASE_PASSWORD
   - POSTGRES_PASSWORD
   - MYSQL_PASSWORD
   - MONGO_PASSWORD
@@ -148,4 +150,3 @@ options:
 #   DEBUG=true                           → Pas de pattern sensible
 #
 # ============================================================================
-

@@ -9,6 +9,13 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$SCRIPT_DIR/.registry-profiles"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+export PROJECT_ROOT
+
+# Charger la configuration projet (.devops.yml) via loader central
+source "$SCRIPT_DIR/config-loader.sh"
+load_devops_config || true
+PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
 
 # Couleurs
 GREEN='\033[0;32m'
@@ -58,7 +65,7 @@ REGISTRY_URL=${REGISTRY_URL:-docker.io}
 REGISTRY_USERNAME=${REGISTRY_USERNAME:-}
 REGISTRY_TOKEN=${REGISTRY_TOKEN:-}
 REGISTRY_PASSWORD=${REGISTRY_PASSWORD:-}
-IMAGE_NAME=${IMAGE_NAME:-${PROJECT_NAME:-app}}
+IMAGE_NAME=${IMAGE_NAME:-${PROJECT_NAME}}
 GIT_REPO=${GIT_REPO:-}
 GITHUB_TOKEN=${GITHUB_TOKEN:-}
 DEV_BRANCH=${DEV_BRANCH:-dev}
@@ -134,4 +141,3 @@ else
     echo "  3. Supprimer les sauvegardes (.backup) si tout fonctionne"
     echo ""
 fi
-
