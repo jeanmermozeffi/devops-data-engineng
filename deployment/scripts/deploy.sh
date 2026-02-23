@@ -134,6 +134,24 @@ load_env() {
         # Exporter la variable
         export "$key=$value"
     done < "$env_file"
+
+    # Normaliser les variables Docker les plus utilisées par docker-compose.
+    # Fallback: utiliser la config projet (.devops.yml) quand .env.<env> est incomplet.
+    export ENV="${ENV:-$env}"
+    export DOCKER_REGISTRY="${DOCKER_REGISTRY:-${REGISTRY_URL:-docker.io}}"
+    export DOCKER_USERNAME="${DOCKER_USERNAME:-${REGISTRY_USERNAME:-}}"
+    export IMAGE_NAME="${IMAGE_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
+
+    # Validation explicite pour éviter l'erreur docker "invalid reference format"
+    # quand une image est construite avec ".../${DOCKER_USERNAME}/...".
+    if [ -z "${DOCKER_USERNAME:-}" ]; then
+        if grep -q '\${DOCKER_USERNAME' "deployment/docker-compose.yml" 2>/dev/null \
+           || grep -q '\${DOCKER_USERNAME' "deployment/docker-compose.${env}.yml" 2>/dev/null; then
+            log_error "DOCKER_USERNAME est vide (ni .env.${env} ni .devops.yml -> REGISTRY_USERNAME)."
+            log_error "Définissez DOCKER_USERNAME dans .env.${env} ou REGISTRY_USERNAME dans .devops.yml."
+            exit 1
+        fi
+    fi
 }
 
 # ============================================================================
