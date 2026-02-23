@@ -229,6 +229,11 @@ load_devops_config() {
                 export SSH_IDENTITY_FILE="$value"
                 ;;
 
+            # Clé de chiffrement des .env (stockée dans .devops.yml pour backup)
+            env_encryption_key)
+                export ENV_ENCRYPTION_KEY="$value"
+                ;;
+
             # Ignorer les sections et sous-clés YAML
             compose_files|compose_files_registry)
                 # Ces sections seront traitées séparément si nécessaire
