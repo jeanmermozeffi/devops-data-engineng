@@ -263,10 +263,29 @@ build_registry_image_name() {
         return 1
     fi
 
+    local repository
+    repository=$(get_registry_repository)
+
     if [ "$REGISTRY_URL" == "docker.io" ]; then
-        echo "${REGISTRY_USERNAME}/${IMAGE_NAME}:${tag}"
+        echo "${repository}:${tag}"
     else
-        echo "${REGISTRY_URL}/${REGISTRY_USERNAME}/${IMAGE_NAME}:${tag}"
+        echo "${REGISTRY_URL}/${repository}:${tag}"
+    fi
+}
+
+# Construire le repository registry en évitant les doublons namespace/image.
+# Supporte:
+# - IMAGE_NAME="cicbi-kafka-platform" + REGISTRY_USERNAME="effijeanmermoz" -> effijeanmermoz/cicbi-kafka-platform
+# - IMAGE_NAME="effijeanmermoz/cicbi-kafka-platform"                      -> effijeanmermoz/cicbi-kafka-platform
+get_registry_repository() {
+    local image_name="${IMAGE_NAME}"
+
+    if [[ "$image_name" == */* ]]; then
+        echo "$image_name"
+    elif [ -n "$REGISTRY_USERNAME" ]; then
+        echo "${REGISTRY_USERNAME}/${image_name}"
+    else
+        echo "$image_name"
     fi
 }
 
@@ -284,10 +303,58 @@ registry_list_tags() {
     case "${REGISTRY_TYPE:-dockerhub}" in
         dockerhub)
             log_info "Interrogation de Docker Hub..."
-            local api_url="https://hub.docker.com/v2/repositories/${REGISTRY_USERNAME}/${IMAGE_NAME}/tags?page_size=100"
+            local repository
+            repository=$(get_registry_repository)
+            local api_url="https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100"
 
-            # Récupérer les tags et filtrer par environnement
-            local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-" | sort -r)
+            # Récupérer les tags et leurs dates, filtrer par environnement
+            local response
+            response=$(curl -s "$api_url")
+            if [ -z "$response" ]; then
+                log_warn "Réponse vide de Docker Hub"
+                return 1
+            fi
+
+            local tags
+            tags=$(DOCKERHUB_RESPONSE="$response" python3 - "$env" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime
+
+env = sys.argv[1]
+try:
+    data = json.loads(os.environ.get("DOCKERHUB_RESPONSE", "{}"))
+except Exception:
+    sys.exit(2)
+items = data.get("results", [])
+out = []
+for it in items:
+    name = it.get("name", "")
+    if not name.startswith(env + "-"):
+        continue
+    last = it.get("last_updated") or it.get("tag_last_pushed") or ""
+    if last:
+        try:
+            dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            last = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+    if not last:
+        last = "date inconnue"
+    out.append((name, last))
+
+out.sort(key=lambda x: x[0], reverse=True)
+for name, last in out:
+    print(f"{name}|{last}")
+PY
+)
+            local parse_status=$?
+
+            if [ $parse_status -ne 0 ]; then
+                log_warn "Réponse Docker Hub invalide"
+                return 1
+            fi
 
             if [ -z "$tags" ]; then
                 log_warn "Aucun tag trouvé pour l'environnement $env"
@@ -297,11 +364,11 @@ registry_list_tags() {
             echo -e "${CYAN}Tags disponibles pour ${WHITE}$env${NC}:\n"
 
             local count=1
-            echo "$tags" | while IFS= read -r tag; do
+            echo "$tags" | while IFS='|' read -r tag tag_date; do
                 if [[ "$tag" == *"-latest" ]]; then
-                    echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC}"
+                    echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC} - $tag_date"
                 else
-                    echo -e "  ${CYAN}$count)${NC} $tag"
+                    echo -e "  ${CYAN}$count)${NC} $tag - $tag_date"
                 fi
                 ((count++))
             done
@@ -1277,7 +1344,9 @@ show_interactive_menu() {
             echo ""
 
             # Récupérer les tags disponibles
-            local api_url="https://hub.docker.com/v2/repositories/${REGISTRY_USERNAME}/${IMAGE_NAME}/tags?page_size=100"
+            local repository
+            repository=$(get_registry_repository)
+            local api_url="https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100"
             local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-" | sort -rV)
 
             if [ -z "$tags" ]; then

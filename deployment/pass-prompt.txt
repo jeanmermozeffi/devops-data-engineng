@@ -1,14 +1,14 @@
-Nous avons un nouveau projet : /Users/jeanmermozeffi/PycharmProjects/superset-bi
+Nous avons un nouveau projet : /home/jeeff/PycharmProjects/cicbi-kafka-platform/
 
 Il faut initialiser la configuration DevOps complete en se basant sur :
-- Le systeme de deploiement centralise dans /Users/jeanmermozeffi/PycharmProjects/devops-enginering/deployment
-- Les fichiers Docker existants dans : /Users/jeanmermozeffi/PycharmProjects/superset-bi/
+- Le systeme de deploiement centralise dans /home/jeeff/PycharmProjects/devops-data-engineng/deployment/
+- Les fichiers Docker existants dans : /home/jeeff/PycharmProjects/cicbi-kafka-platform/
 
 Voici les informations du projet :
-- Nom du projet : superset-bi
-- Type de stack : reporting-superset
+- Nom du projet : cicbi-kafka-platform
+- Type de stack : streaming-kafka
 - Registry Docker Hub username : effijeanmermoz
-- Repo Git : https://github.com/cicbi/superset-bi.git
+- Repo Git : https://github.com/cicbi/cicbi-kafka-platform.git
 
 Etapes a realiser :
 
@@ -114,7 +114,7 @@ CONVENTIONS DE NOMMAGE :
 STRUCTURE FINALE ATTENDUE :
 ================================================================================
 
-superset-bi/
+cicbi-kafka-platform/
 ├── .devops.yml                              # Config DevOps (NE PAS committer si secrets)
 ├── .devops.yml.example                      # Template public
 ├── .env.dev                                 # Variables dev
