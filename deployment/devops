@@ -122,8 +122,90 @@ load_project_config() {
         esac
     done < "$config_file"
 
+    # Support format YAML imbriqué (project.name, registry.username, etc.)
+    get_nested_yaml_value() {
+        local section="$1"
+        local nested_key="$2"
+        local file="$3"
+
+        awk -v section="$section" -v nested_key="$nested_key" '
+            function trim(s) {
+                gsub(/^[ \t]+|[ \t]+$/, "", s)
+                return s
+            }
+            BEGIN { in_section=0 }
+            $0 ~ "^[[:space:]]*" section ":[[:space:]]*$" { in_section=1; next }
+            in_section && $0 ~ "^[^[:space:]]" { in_section=0 }
+            in_section && $0 ~ "^[[:space:]]+" nested_key ":[[:space:]]*" {
+                line=$0
+                sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
+                sub(/[[:space:]]+#.*$/, "", line)
+                line=trim(line)
+                gsub(/^"|"$/, "", line)
+                gsub(/^'\''|'\''$/, "", line)
+                print line
+                exit
+            }
+        ' "$file"
+    }
+
+    local nested_value=""
+    nested_value=$(get_nested_yaml_value "project" "name" "$config_file")
+    [ -n "$nested_value" ] && PROJECT_NAME="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "project" "label_namespace" "$config_file")
+    [ -n "$nested_value" ] && LABEL_NAMESPACE="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "registry" "url" "$config_file")
+    [ -n "$nested_value" ] && REGISTRY_URL="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "registry" "username" "$config_file")
+    [ -n "$nested_value" ] && REGISTRY_USERNAME="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "registry" "image_name" "$config_file")
+    if [ -z "$nested_value" ]; then
+        nested_value=$(get_nested_yaml_value "registry" "image" "$config_file")
+    fi
+    [ -n "$nested_value" ] && IMAGE_NAME="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "registry" "registry_token" "$config_file")
+    [ -n "$nested_value" ] && REGISTRY_TOKEN="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "git" "repo" "$config_file")
+    [ -n "$nested_value" ] && GIT_REPO="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "git" "github_token" "$config_file")
+    [ -n "$nested_value" ] && GITHUB_TOKEN="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "git" "dev_branch" "$config_file")
+    [ -n "$nested_value" ] && DEV_BRANCH="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "git" "staging_branch" "$config_file")
+    [ -n "$nested_value" ] && STAGING_BRANCH="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "git" "prod_branch" "$config_file")
+    [ -n "$nested_value" ] && PROD_BRANCH="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "name" "$config_file")
+    [ -n "$nested_value" ] && SERVER_NAME="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "host" "$config_file")
+    [ -n "$nested_value" ] && SERVER_HOST="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "port" "$config_file")
+    [ -n "$nested_value" ] && SERVER_PORT="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "user" "$config_file")
+    [ -n "$nested_value" ] && SERVER_USER="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "ssh_key" "$config_file")
+    [ -n "$nested_value" ] && SERVER_SSH_KEY="$nested_value"
+
+    nested_value=$(get_nested_yaml_value "server" "deploy_path" "$config_file")
+    [ -n "$nested_value" ] && SERVER_DEPLOY_PATH="$nested_value"
+
     # Définir les valeurs par défaut si non spécifiées
-    export PROJECT_NAME="${PROJECT_NAME:-app}"
+    export PROJECT_NAME="${PROJECT_NAME:-$(basename "$CURRENT_PROJECT_DIR")}"
     export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}"
     export LABEL_NAMESPACE="${LABEL_NAMESPACE:-cic}"
     export IMAGE_NAME="${IMAGE_NAME:-$PROJECT_NAME}"
@@ -616,7 +698,10 @@ cmd_encrypt() {
     fi
 
     log_info "Appel du script: $encrypt_script"
-    bash "$encrypt_script" "$@"
+    (
+        cd "$CURRENT_PROJECT_DIR"
+        bash "$encrypt_script" "$@"
+    )
 }
 
 cmd_deploy_registry() {
@@ -679,7 +764,7 @@ cmd_interactive() {
         echo -e "  ${CYAN}3)${NC} ${GREEN}registry${NC}       - Gérer le Docker Registry"
         echo -e "  ${CYAN}4)${NC} ${GREEN}deploy-registry${NC} - Déployer depuis Docker Hub"
         echo -e "  ${CYAN}5)${NC} ${GREEN}audit${NC}          - Audit de sécurité"
-        echo -e "  ${CYAN}6)${NC} ${GREEN}encrypt${NC}        - Chiffrer les fichiers .env"
+        echo -e "  ${CYAN}6)${NC} ${GREEN}encrypt${NC}        - Chiffrer les fichiers .env (option: --keep-clear)"
         echo -e "  ${CYAN}7)${NC} ${GREEN}labels${NC}         - Standardiser les labels <namespace>.*"
         echo ""
         echo -e "  ${CYAN}h)${NC} ${GREEN}help${NC}           - Afficher l'aide complète"
@@ -786,7 +871,7 @@ cmd_help() {
     echo -e "${WHITE}COMMANDES UTILITAIRES:${NC}"
     echo ""
     echo -e "    ${GREEN}audit${NC}                   Audit de sécurité du projet"
-    echo -e "    ${GREEN}encrypt [file]${NC}          Chiffrer les fichiers .env"
+    echo -e "    ${GREEN}encrypt [--keep-clear]${NC}  Chiffrer les fichiers .env"
     echo -e "    ${GREEN}labels [sync|check]${NC}     Standardiser/verifier les labels <namespace>.*"
     echo -e "    ${GREEN}help${NC}                    Afficher cette aide"
     echo ""
@@ -797,6 +882,7 @@ cmd_help() {
     echo -e "    ${CYAN}devops package${NC}               # Créer un package"
     echo -e "    ${CYAN}devops registry release prod v1.0.0${NC}"
     echo -e "    ${CYAN}devops deploy-registry prod${NC}"
+    echo -e "    ${CYAN}devops encrypt --keep-clear${NC}  # Chiffrer sans supprimer les .env clairs"
     echo -e "    ${CYAN}devops labels sync${NC}          # Forcer les labels du namespace configure"
     echo -e "    ${CYAN}devops labels sync --label-prefix orange${NC}"
     echo -e "    ${CYAN}devops labels check${NC}         # Vérifier la conformité des labels"

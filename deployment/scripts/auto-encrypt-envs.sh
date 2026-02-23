@@ -40,14 +40,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PARENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENCRYPT_SCRIPT="$SCRIPT_DIR/env-encrypt.py"
 SENSITIVE_VARS="$SCRIPT_DIR/sensitive-vars.yml"
-KEY_FILE="$PARENT_DIR/.env.key"
+PROJECT_ROOT="${PROJECT_ROOT:-$PARENT_DIR}"
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
+KEY_FILE="$PROJECT_ROOT/.env.key"
 AUTO_CONFIRM=false
+KEEP_CLEAR=false
 
 # Détecter et utiliser le venv si disponible
-VENV_DIR="$PARENT_DIR/.venv"
-if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python3" ]; then
-    PYTHON_CMD="$VENV_DIR/bin/python3"
-    log_info "Utilisation du venv: $VENV_DIR"
+PROJECT_VENV_DIR="$PROJECT_ROOT/.venv"
+DEVOPS_VENV_DIR="$PARENT_DIR/.venv"
+if [ -d "$PROJECT_VENV_DIR" ] && [ -f "$PROJECT_VENV_DIR/bin/python3" ]; then
+    PYTHON_CMD="$PROJECT_VENV_DIR/bin/python3"
+    log_info "Utilisation du venv projet: $PROJECT_VENV_DIR"
+elif [ -d "$DEVOPS_VENV_DIR" ] && [ -f "$DEVOPS_VENV_DIR/bin/python3" ]; then
+    PYTHON_CMD="$DEVOPS_VENV_DIR/bin/python3"
+    log_info "Utilisation du venv devops: $DEVOPS_VENV_DIR"
 else
     PYTHON_CMD="python3"
     log_info "Utilisation de Python global"
@@ -59,25 +66,30 @@ for arg in "$@"; do
         --auto-confirm)
             AUTO_CONFIRM=true
             ;;
+        --keep-clear)
+            KEEP_CLEAR=true
+            ;;
         --help|-h)
             cat <<EOF
 Usage: $0 [OPTIONS]
 
 Options:
   --auto-confirm    Mode automatique (pas de confirmation)
+  --keep-clear      Conserver les fichiers .env en clair après chiffrement
   --help, -h        Afficher cette aide
 
 Description:
   Ce script automatise le chiffrement de tous les fichiers .env
-  trouvés dans le répertoire parent et supprime les versions
-  non chiffrées pour sécuriser le serveur.
+  trouvés dans le répertoire du projet cible.
+  Par défaut, les fichiers .env en clair sont supprimés après chiffrement.
+  Avec --keep-clear, les fichiers .env en clair sont conservés.
 
 Étapes:
   1. Vérifier les dépendances Python
   2. Générer une clé de chiffrement (si inexistante)
   3. Lister les fichiers .env à chiffrer
   4. Chiffrer chaque fichier .env
-  5. Supprimer les fichiers .env non chiffrés
+  5. Supprimer les fichiers .env non chiffrés (sauf --keep-clear)
   6. Afficher le résumé
 
 EOF
@@ -96,6 +108,7 @@ done
 # ============================================================================
 
 log_header "CHIFFREMENT AUTOMATIQUE DES FICHIERS .ENV"
+log_info "Projet cible: $PROJECT_ROOT"
 
 # Vérifier que le script Python existe
 if [ ! -f "$ENCRYPT_SCRIPT" ]; then
@@ -149,9 +162,14 @@ echo ""
 if [ -f "$KEY_FILE" ]; then
     log_info "Clé de chiffrement existante trouvée: $KEY_FILE"
 else
+    if [ -d "$KEY_FILE" ]; then
+        KEY_DIR_BACKUP="${KEY_FILE}.dir.bak.$(date +%Y%m%d%H%M%S)"
+        mv "$KEY_FILE" "$KEY_DIR_BACKUP"
+        log_warn "Chemin clé invalide (dossier): déplacé vers $KEY_DIR_BACKUP"
+    fi
+
     log_info "Génération d'une nouvelle clé de chiffrement..."
-    cd "$PARENT_DIR"
-    $PYTHON_CMD "$ENCRYPT_SCRIPT" generate-key
+    $PYTHON_CMD "$ENCRYPT_SCRIPT" generate-key --key-file "$KEY_FILE"
     log_success "Clé générée: $KEY_FILE"
     log_warn "⚠️  IMPORTANT: Sauvegardez cette clé dans un endroit sûr !"
 fi
@@ -163,11 +181,11 @@ echo ""
 # ============================================================================
 
 log_info "Recherche des fichiers .env..."
-cd "$PARENT_DIR"
+cd "$PROJECT_ROOT"
 
 # Trouver tous les fichiers .env (mais pas .example, .encrypted, .key ou .registry)
 # Note: .env.registry ne contient pas de secrets, juste des noms publics (registry, username, image)
-ENV_FILES=$(find . -maxdepth 1 -name ".env.*" ! -name "*.example" ! -name "*.encrypted" ! -name ".env.key" ! -name ".env.registry" -type f)
+ENV_FILES=$(find . -maxdepth 1 -type f \( -name ".env" -o -name ".env.*" \) ! -name "*.example" ! -name "*.encrypted" ! -name ".env.key" ! -name ".env.registry" ! -name ".env.local" ! -name ".env.bak")
 
 if [ -z "$ENV_FILES" ]; then
     log_warn "Aucun fichier .env trouvé à chiffrer"
@@ -185,7 +203,11 @@ echo ""
 if [ "$AUTO_CONFIRM" = false ]; then
     log_warn "⚠️  ATTENTION: Cette opération va:"
     echo "  1. Chiffrer tous les fichiers .env listés ci-dessus"
-    echo "  2. Supprimer les versions non chiffrées"
+    if [ "$KEEP_CLEAR" = true ]; then
+        echo "  2. Conserver les versions non chiffrées (--keep-clear)"
+    else
+        echo "  2. Supprimer les versions non chiffrées"
+    fi
     echo ""
     read -p "Continuer? (y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -203,14 +225,21 @@ log_header "CHIFFREMENT EN COURS"
 
 ENCRYPTED_COUNT=0
 FAILED_COUNT=0
+DELETED_COUNT=0
 
 for env_file in $ENV_FILES; do
     # Enlever le ./ au début
     env_file="${env_file#./}"
 
+    if [ -d "${env_file}.encrypted" ]; then
+        encrypted_dir_backup="${env_file}.encrypted.dir.bak.$(date +%Y%m%d%H%M%S)"
+        mv "${env_file}.encrypted" "$encrypted_dir_backup"
+        log_warn "Chemin chiffré invalide (dossier): ${env_file}.encrypted -> $encrypted_dir_backup"
+    fi
+
     log_info "Chiffrement de $env_file..."
 
-    if $PYTHON_CMD "$ENCRYPT_SCRIPT" encrypt "$env_file" 2>&1; then
+    if $PYTHON_CMD "$ENCRYPT_SCRIPT" encrypt "$env_file" --key-file "$KEY_FILE" 2>&1; then
         log_success "✓ $env_file → ${env_file}.encrypted"
         ENCRYPTED_COUNT=$((ENCRYPTED_COUNT + 1))
     else
@@ -225,10 +254,11 @@ echo ""
 # Suppression des fichiers non chiffrés
 # ============================================================================
 
-if [ $ENCRYPTED_COUNT -gt 0 ]; then
+if [ "$KEEP_CLEAR" = true ]; then
+    log_info "Option --keep-clear active: conservation des fichiers .env en clair"
+    echo ""
+elif [ $ENCRYPTED_COUNT -gt 0 ]; then
     log_header "SUPPRESSION DES FICHIERS NON CHIFFRÉS"
-
-    DELETED_COUNT=0
 
     for env_file in $ENV_FILES; do
         env_file="${env_file#./}"

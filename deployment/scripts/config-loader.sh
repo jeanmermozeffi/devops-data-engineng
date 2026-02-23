@@ -243,6 +243,96 @@ load_devops_config() {
         esac
     done < "$config_file"
 
+    # Support du format YAML imbriqué (ex: project.name, registry.username)
+    # utilisé par les projets récents.
+    get_nested_yaml_value() {
+        local section="$1"
+        local nested_key="$2"
+        local file="$3"
+
+        awk -v section="$section" -v nested_key="$nested_key" '
+            function trim(s) {
+                gsub(/^[ \t]+|[ \t]+$/, "", s)
+                return s
+            }
+            BEGIN { in_section=0 }
+            $0 ~ "^[[:space:]]*" section ":[[:space:]]*$" { in_section=1; next }
+            in_section && $0 ~ "^[^[:space:]]" { in_section=0 }
+            in_section && $0 ~ "^[[:space:]]+" nested_key ":[[:space:]]*" {
+                line=$0
+                sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line)
+                sub(/[[:space:]]+#.*$/, "", line)
+                line=trim(line)
+                gsub(/^"|"$/, "", line)
+                gsub(/^'\''|'\''$/, "", line)
+                print line
+                exit
+            }
+        ' "$file"
+    }
+
+    local nested_value=""
+
+    nested_value=$(get_nested_yaml_value "project" "name" "$config_file")
+    [ -n "$nested_value" ] && { PROJECT_NAME="$nested_value"; export PROJECT_NAME; }
+
+    nested_value=$(get_nested_yaml_value "project" "label_namespace" "$config_file")
+    [ -n "$nested_value" ] && { LABEL_NAMESPACE="$nested_value"; export LABEL_NAMESPACE; }
+
+    nested_value=$(get_nested_yaml_value "registry" "url" "$config_file")
+    [ -n "$nested_value" ] && { REGISTRY_URL="$nested_value"; export REGISTRY_URL; }
+
+    nested_value=$(get_nested_yaml_value "registry" "username" "$config_file")
+    [ -n "$nested_value" ] && { REGISTRY_USERNAME="$nested_value"; export REGISTRY_USERNAME; }
+
+    nested_value=$(get_nested_yaml_value "registry" "image" "$config_file")
+    if [ -z "$nested_value" ]; then
+        nested_value=$(get_nested_yaml_value "registry" "image_name" "$config_file")
+    fi
+    [ -n "$nested_value" ] && { IMAGE_NAME="$nested_value"; export IMAGE_NAME; }
+
+    nested_value=$(get_nested_yaml_value "registry" "type" "$config_file")
+    [ -n "$nested_value" ] && { REGISTRY_TYPE="$nested_value"; export REGISTRY_TYPE; }
+
+    nested_value=$(get_nested_yaml_value "git" "repo" "$config_file")
+    [ -n "$nested_value" ] && { GIT_REPO="$nested_value"; export GIT_REPO; }
+
+    nested_value=$(get_nested_yaml_value "git" "dev_branch" "$config_file")
+    [ -n "$nested_value" ] && { DEV_BRANCH="$nested_value"; export DEV_BRANCH; }
+
+    nested_value=$(get_nested_yaml_value "git" "staging_branch" "$config_file")
+    [ -n "$nested_value" ] && { STAGING_BRANCH="$nested_value"; export STAGING_BRANCH; }
+
+    nested_value=$(get_nested_yaml_value "git" "prod_branch" "$config_file")
+    [ -n "$nested_value" ] && { PROD_BRANCH="$nested_value"; export PROD_BRANCH; }
+
+    # Normaliser une URL de repo Git en format clonable HTTPS
+    normalize_git_repo_url() {
+        local repo="$1"
+        repo=$(echo "$repo" | xargs)
+        [ -z "$repo" ] && { echo ""; return 0; }
+
+        # Alias SSH courant (ex: git@github.com-cicbi:org/repo.git)
+        if echo "$repo" | grep -Eq '^git@github\.com[^:]*:'; then
+            echo "$repo" | sed -E 's|^git@github\.com[^:]*:|https://github.com/|'
+            return 0
+        fi
+
+        # Format SSH générique
+        if echo "$repo" | grep -Eq '^git@[^:]+:'; then
+            echo "$repo" | sed -E 's|^git@([^:]+):|https://\1/|'
+            return 0
+        fi
+
+        # Format ssh://git@host/org/repo.git
+        if echo "$repo" | grep -Eq '^ssh://git@[^/]+/.+'; then
+            echo "$repo" | sed -E 's|^ssh://git@([^/]+)/|https://\1/|'
+            return 0
+        fi
+
+        echo "$repo"
+    }
+
     # ========================================================================
     # DÉFINIR LES VALEURS PAR DÉFAUT
     # ========================================================================
@@ -261,6 +351,13 @@ load_devops_config() {
     export DEV_BRANCH="${DEV_BRANCH:-dev}"
     export STAGING_BRANCH="${STAGING_BRANCH:-staging}"
     export PROD_BRANCH="${PROD_BRANCH:-main}"
+
+    # GIT_REPO: fallback auto depuis le remote Git local si non défini
+    if [ -z "$GIT_REPO" ] && command -v git >/dev/null 2>&1; then
+        GIT_REPO="$(git -C "$PROJECT_ROOT" config --get remote.origin.url 2>/dev/null || true)"
+    fi
+    GIT_REPO="$(normalize_git_repo_url "$GIT_REPO")"
+    export GIT_REPO
 
     # Ports
     export DEV_PORT="${DEV_PORT:-8001}"

@@ -48,6 +48,15 @@ log_header() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOYMENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$DEPLOYMENT_DIR/.." && pwd)"
+export PROJECT_ROOT
+
+# Charger la configuration projet (.devops.yml) via loader central
+source "$SCRIPT_DIR/config-loader.sh"
+load_devops_config || true
+
+# Nom projet robuste (depuis .devops.yml ou fallback dossier)
+PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
+SERVER_APP_DIR="/srv/home/${PROJECT_NAME}"
 
 SERVER=$1
 
@@ -106,7 +115,7 @@ done
 # Étape 3: Créer le répertoire deployment sur le serveur si nécessaire
 log_info "Étape 3/5: Préparation du serveur..."
 
-ssh "$SERVER" "mkdir -p /srv/home/${PROJECT_NAME:-app}/deployment" || {
+ssh "$SERVER" "mkdir -p \"$SERVER_APP_DIR/deployment\"" || {
     log_error "Impossible de se connecter au serveur $SERVER"
     exit 1
 }
@@ -118,7 +127,7 @@ log_info "Étape 4/5: Transfert des fichiers sur le serveur..."
 
 # Transférer la clé de chiffrement
 log_info "Transfert de .env.key..."
-scp "$PROJECT_ROOT/.env.key" "$SERVER:/srv/home/${PROJECT_NAME:-app}/" || {
+scp "$PROJECT_ROOT/.env.key" "$SERVER:$SERVER_APP_DIR/" || {
     log_error "Échec du transfert de la clé"
     exit 1
 }
@@ -130,7 +139,7 @@ for env in dev staging prod; do
 
     if [ -f "$encrypted_file" ]; then
         log_info "Transfert de .env.$env.encrypted..."
-        scp "$encrypted_file" "$SERVER:/srv/home/${PROJECT_NAME:-app}/deployment/" || {
+        scp "$encrypted_file" "$SERVER:$SERVER_APP_DIR/deployment/" || {
             log_warn "Échec du transfert de .env.$env.encrypted"
             continue
         }
@@ -141,8 +150,8 @@ done
 # Étape 5: Sécuriser les fichiers sur le serveur
 log_info "Étape 5/5: Sécurisation des fichiers sur le serveur..."
 
-ssh "$SERVER" << 'ENDSSH'
-cd /srv/home/${PROJECT_NAME:-app}
+ssh "$SERVER" "SERVER_APP_DIR='$SERVER_APP_DIR' bash -s" << 'ENDSSH'
+cd "$SERVER_APP_DIR"
 
 # Protéger la clé de chiffrement
 if [ -f .env.key ]; then
@@ -198,14 +207,14 @@ echo ""
 log_header "Récapitulatif"
 
 echo -e "${CYAN}Fichiers installés sur $SERVER:${NC}"
-echo "  • /srv/home/${PROJECT_NAME:-app}/.env.key (chmod 600)"
-echo "  • /srv/home/${PROJECT_NAME:-app}/deployment/.env.*.encrypted"
-echo "  • /srv/home/${PROJECT_NAME:-app}/deployment/.server-marker"
+echo "  • $SERVER_APP_DIR/.env.key (chmod 600)"
+echo "  • $SERVER_APP_DIR/deployment/.env.*.encrypted"
+echo "  • $SERVER_APP_DIR/deployment/.server-marker"
 echo ""
 echo -e "${GREEN}Le serveur est maintenant configuré!${NC}"
 echo ""
 echo -e "${CYAN}Pour déployer:${NC}"
 echo "  ssh $SERVER"
-echo "  cd /srv/home/${PROJECT_NAME:-app}/deployment/scripts"
+echo "  cd $SERVER_APP_DIR/deployment/scripts"
 echo "  ./deploy-registry.sh deploy dev"
 echo ""
