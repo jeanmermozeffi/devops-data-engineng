@@ -732,6 +732,9 @@ cmd_deploy() {
         fastapi-postgres-redis)
             containers=("api" "redis" "postgres")
             ;;
+        streaming-kafka)
+            containers=("dim_consumer" "fact_consumer" "redis")
+            ;;
         *)
             containers=("api" "redis")
             ;;
@@ -948,6 +951,38 @@ cmd_health() {
                 fi
             done
             ;;
+        streaming-kafka)
+            # Pour les stacks Kafka/streaming, pas d'endpoint HTTP : vérifier l'état des conteneurs Docker
+            log_info "Health check des consumers Kafka (état Docker)..."
+            local all_healthy=true
+            local project_prefix="${PROJECT_NAME}-"
+
+            for container in $(docker ps --filter "name=${project_prefix}" --filter "name=-${env}" --format '{{.Names}}' 2>/dev/null); do
+                local status
+                status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "no-healthcheck")
+                local running
+                running=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
+                if [ "$running" = "true" ]; then
+                    if [ "$status" = "healthy" ] || [ "$status" = "no-healthcheck" ]; then
+                        log_success "Conteneur $container: en cours d'exécution ($status)"
+                    else
+                        log_warn "Conteneur $container: état=$status"
+                        all_healthy=false
+                    fi
+                else
+                    log_error "Conteneur $container: non démarré"
+                    all_healthy=false
+                fi
+            done
+
+            if [ "$all_healthy" = "true" ]; then
+                log_success "Tous les consumers Kafka sont opérationnels"
+                return 0
+            else
+                log_warn "Certains conteneurs ne sont pas dans un état sain — vérifiez avec: docker ps"
+                return 1
+            fi
+            ;;
         *)
             local port=$(get_port_for_env "$env" "api")
 
@@ -1081,6 +1116,9 @@ cmd_cleanup_bad_names() {
             ;;
         fastapi-postgres-redis)
             containers=("api" "redis" "postgres")
+            ;;
+        streaming-kafka)
+            containers=("dim_consumer" "fact_consumer" "redis")
             ;;
         *)
             containers=("api" "redis")
