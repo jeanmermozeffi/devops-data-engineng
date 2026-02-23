@@ -550,6 +550,150 @@ clean_docker_networks() {
     fi
 }
 
+# Déterminer les services à build en ne gardant qu'un service par image.
+# Évite les conflits "image already exists" quand plusieurs services partagent la même image.
+get_compose_build_targets_by_unique_image() {
+    local env=$1
+    local workdir=${2:-$(pwd)}
+
+    (
+        cd "$workdir" && docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" config 2>/dev/null
+    ) | awk '
+        function flush_service() {
+            if (current_service != "" && has_build == 1) {
+                key = (current_image != "" ? current_image : "__NO_IMAGE__:" current_service)
+                if (!(key in seen)) {
+                    seen[key] = 1
+                    out[++count] = current_service
+                }
+            }
+        }
+
+        /^services:[[:space:]]*$/ {
+            in_services = 1
+            next
+        }
+
+        in_services && /^[^[:space:]]/ {
+            flush_service()
+            in_services = 0
+        }
+
+        in_services && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            flush_service()
+            current_service = $1
+            sub(/:$/, "", current_service)
+            has_build = 0
+            current_image = ""
+            next
+        }
+
+        in_services && /^    build:[[:space:]]*$/ {
+            has_build = 1
+            next
+        }
+
+        in_services && /^    image:[[:space:]]*/ {
+            current_image = $2
+            gsub(/["'\'']/, "", current_image)
+            next
+        }
+
+        END {
+            flush_service()
+            for (i = 1; i <= count; i++) {
+                print out[i]
+            }
+        }
+    '
+}
+
+# Build docker compose en série avec déduplication des images cibles.
+run_compose_build() {
+    local env=$1
+    local no_cache=${2:-false}
+    local workdir=${3:-$(pwd)}
+    local -a build_targets=()
+    local -a compose_cmd=(docker compose --parallel 1 -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" build)
+
+    if [ "$no_cache" == "true" ]; then
+        compose_cmd+=("--no-cache")
+    fi
+
+    while IFS= read -r service; do
+        [ -n "$service" ] && build_targets+=("$service")
+    done < <(get_compose_build_targets_by_unique_image "$env" "$workdir" || true)
+
+    if [ ${#build_targets[@]} -gt 0 ]; then
+        log_info "Build des services (images uniques): ${build_targets[*]}"
+        compose_cmd+=("${build_targets[@]}")
+    else
+        log_warn "Impossible de déterminer les services à build, fallback sur tous les services"
+    fi
+
+    (cd "$workdir" && "${compose_cmd[@]}")
+}
+
+# Lister les services déclarés dans docker-compose pour un environnement.
+get_compose_services() {
+    local env=$1
+    local workdir=${2:-$(pwd)}
+
+    (
+        cd "$workdir" && docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" config 2>/dev/null
+    ) | awk '
+        /^services:[[:space:]]*$/ {
+            in_services = 1
+            next
+        }
+
+        in_services && /^[^[:space:]]/ {
+            in_services = 0
+        }
+
+        in_services && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            service = $1
+            sub(/:$/, "", service)
+            print service
+        }
+    '
+}
+
+# Détecter le type de stack à partir des services réellement déclarés.
+detect_stack_type_for_env() {
+    local env=$1
+    local workdir=${2:-$(pwd)}
+    local services
+
+    services="$(get_compose_services "$env" "$workdir" 2>/dev/null | tr '\n' ' ')"
+
+    if echo "$services" | grep -Eq '(^| )prometheus( |$)|(^| )grafana( |$)'; then
+        echo "monitoring"
+        return 0
+    fi
+
+    if echo "$services" | grep -Eq '(^| )superset( |$)|(^| )superset-worker( |$)|(^| )superset-beat( |$)'; then
+        echo "reporting-superset"
+        return 0
+    fi
+
+    if echo "$services" | grep -Eq '(^| )(dim_consumer|fact_consumer)( |$)'; then
+        echo "streaming-kafka"
+        return 0
+    fi
+
+    if echo "$services" | grep -Eq '(^| )api( |$)'; then
+        if echo "$services" | grep -Eq '(^| )postgres( |$)'; then
+            echo "fastapi-postgres-redis"
+        else
+            echo "fastapi-redis"
+        fi
+        return 0
+    fi
+
+    echo "${STACK_TYPE:-fastapi-redis}"
+}
+
 # ============================================================================
 # COMMANDES PRINCIPALES
 # ============================================================================
@@ -593,14 +737,8 @@ cmd_deploy() {
         log_info "Répertoire: $(pwd)"
         log_info "Branche Git actuelle: $(git branch --show-current 2>/dev/null || echo 'inconnue')"
 
-        # Build local directement (sans clone)
-        local build_args="build"
-        if [ "$no_cache" == "true" ]; then
-            build_args="$build_args --no-cache"
-        fi
-
         log_info "Construction de l'image depuis les fichiers locaux..."
-        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" $build_args
+        run_compose_build "$env" "$no_cache" "$(pwd)"
 
     elif [ "$from_registry" == "true" ]; then
         log_info "Mode: Pull depuis le registry Docker"
@@ -701,14 +839,8 @@ cmd_deploy() {
             rm -rf "$temp_dir/deployment"
             cp -r "deployment" "$temp_dir/deployment"
 
-            # Build des images depuis le clone temporaire
-            local build_args="build"
-            if [ "$no_cache" == "true" ]; then
-                build_args="$build_args --no-cache"
-            fi
-
             log_info "Construction de l'image depuis le clone temporaire..."
-            (cd "$temp_dir" && docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" $build_args)
+            run_compose_build "$env" "$no_cache" "$temp_dir"
 
             # Nettoyer le clone temporaire
             log_info "Nettoyage du clone temporaire..."
@@ -720,25 +852,31 @@ cmd_deploy() {
     # Arrêt des anciens conteneurs
     log_info "Arrêt des anciens conteneurs..."
 
-    # Arrêter les conteneurs existants (detection automatique selon le stack)
+    # Arrêter les conteneurs existants (détection via compose, fallback sur STACK_TYPE)
     local containers=()
-    case "${STACK_TYPE:-fastapi-redis}" in
-        monitoring)
-            containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
-            ;;
-        reporting-superset)
-            containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
-            ;;
-        fastapi-postgres-redis)
-            containers=("api" "redis" "postgres")
-            ;;
-        streaming-kafka)
-            containers=("dim_consumer" "fact_consumer" "redis")
-            ;;
-        *)
-            containers=("api" "redis")
-            ;;
-    esac
+    while IFS= read -r service; do
+        [ -n "$service" ] && containers+=("$service")
+    done < <(get_compose_services "$env" "$(pwd)" || true)
+
+    if [ ${#containers[@]} -eq 0 ]; then
+        case "${STACK_TYPE:-fastapi-redis}" in
+            monitoring)
+                containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
+                ;;
+            reporting-superset)
+                containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
+                ;;
+            fastapi-postgres-redis)
+                containers=("api" "redis" "postgres")
+                ;;
+            streaming-kafka)
+                containers=("dim_consumer" "fact_consumer" "redis")
+                ;;
+            *)
+                containers=("api" "redis")
+                ;;
+        esac
+    fi
 
     # Refuser la convention ${prefix}-${env}-${service}
     local bad_containers=()
@@ -896,9 +1034,12 @@ cmd_health() {
     validate_env "$env"
 
     load_env "$env"
+    local effective_stack_type
+    effective_stack_type="$(detect_stack_type_for_env "$env" "$(pwd)")"
+    log_info "Type de stack détecté: ${effective_stack_type}"
 
-    # Adapter le health check selon le type de stack
-    case "${STACK_TYPE:-fastapi-redis}" in
+    # Adapter le health check selon le type de stack détecté
+    case "$effective_stack_type" in
         monitoring)
             local prom_port=$(get_port_for_env "$env" "prometheus")
             local graf_port=$(get_port_for_env "$env" "grafana")
@@ -960,6 +1101,12 @@ cmd_health() {
             for container in $(docker ps --filter "name=${project_prefix}" --filter "name=-${env}" --format '{{.Names}}' 2>/dev/null); do
                 local status
                 status=$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "no-healthcheck")
+                # Certains conteneurs sans healthcheck renvoient "<no value>" ou vide.
+                # On normalise vers "no-healthcheck" pour ne pas les marquer en erreur.
+                status="$(echo "$status" | tr -d '\r' | sed '/^[[:space:]]*$/d' | head -n 1)"
+                if [ -z "$status" ] || [[ "$status" == *"no value"* ]]; then
+                    status="no-healthcheck"
+                fi
                 local running
                 running=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
                 if [ "$running" = "true" ]; then
@@ -1033,12 +1180,7 @@ cmd_rebuild() {
 
     log_header "RECONSTRUCTION - Environnement: $env"
 
-    local build_args=""
-    if [ "$no_cache" == "true" ]; then
-        build_args="--no-cache"
-    fi
-
-    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" build $build_args
+    run_compose_build "$env" "$no_cache" "$(pwd)"
     log_success "Images reconstruites"
 }
 
@@ -1102,28 +1244,35 @@ cmd_cleanup_bad_names() {
     fi
 
     validate_env "$env"
+    load_env "$env"
 
     log_header "NETTOYAGE NOMMAGE - Environnement: $env"
     confirm_action "Supprimer les conteneurs avec un nommage invalide ?" "$env"
 
     local containers=()
-    case "${STACK_TYPE:-fastapi-redis}" in
-        monitoring)
-            containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
-            ;;
-        reporting-superset)
-            containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
-            ;;
-        fastapi-postgres-redis)
-            containers=("api" "redis" "postgres")
-            ;;
-        streaming-kafka)
-            containers=("dim_consumer" "fact_consumer" "redis")
-            ;;
-        *)
-            containers=("api" "redis")
-            ;;
-    esac
+    while IFS= read -r service; do
+        [ -n "$service" ] && containers+=("$service")
+    done < <(get_compose_services "$env" "$(pwd)" || true)
+
+    if [ ${#containers[@]} -eq 0 ]; then
+        case "${STACK_TYPE:-fastapi-redis}" in
+            monitoring)
+                containers=("prometheus" "grafana" "cadvisor" "node-exporter" "postgres" "postgres-exporter")
+                ;;
+            reporting-superset)
+                containers=("superset" "superset-init" "superset-worker" "superset-beat" "db" "redis")
+                ;;
+            fastapi-postgres-redis)
+                containers=("api" "redis" "postgres")
+                ;;
+            streaming-kafka)
+                containers=("dim_consumer" "fact_consumer" "redis")
+                ;;
+            *)
+                containers=("api" "redis")
+                ;;
+        esac
+    fi
 
     local removed=false
     for service in "${containers[@]}"; do

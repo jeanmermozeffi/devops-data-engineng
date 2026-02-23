@@ -66,15 +66,21 @@ load_devops_config() {
         return 1
     fi
 
-    # Parser le fichier YAML (simple, supporte uniquement clés: valeur)
-    while IFS=': ' read -r key value || [ -n "$key" ]; do
-        # Ignorer commentaires et lignes vides
-        [[ $key =~ ^#.*$ ]] && continue
-        [[ -z "$key" ]] && continue
-        [[ $key =~ ^[[:space:]]*$ ]] && continue
+    # Parser "flat" : uniquement les clés top-level "key: value".
+    # Les sous-clés YAML imbriquées sont traitées plus bas par get_nested_yaml_value.
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Ignorer commentaires, lignes vides et blocs imbriqués
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]] ]] && continue
+        [[ "$line" != *:* ]] && continue
+
+        key="${line%%:*}"
+        value="${line#*:}"
+        key=$(echo "$key" | xargs)
 
         # Nettoyer la valeur (supprimer espaces, quotes, commentaires inline)
-        value=$(echo "$value" | sed 's/#.*//' | xargs | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+        value=$(echo "$value" | sed 's/[[:space:]]#.*$//' | xargs | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 
         # Ignorer les valeurs vides
         [[ -z "$value" ]] && continue
@@ -288,6 +294,9 @@ load_devops_config() {
     [ -n "$nested_value" ] && { REGISTRY_URL="$nested_value"; export REGISTRY_URL; }
 
     nested_value=$(get_nested_yaml_value "registry" "username" "$config_file")
+    if [ -z "$nested_value" ]; then
+        nested_value=$(get_nested_yaml_value "registry" "registry_username" "$config_file")
+    fi
     [ -n "$nested_value" ] && { REGISTRY_USERNAME="$nested_value"; export REGISTRY_USERNAME; }
 
     nested_value=$(get_nested_yaml_value "registry" "image" "$config_file")
@@ -299,7 +308,13 @@ load_devops_config() {
     nested_value=$(get_nested_yaml_value "registry" "type" "$config_file")
     [ -n "$nested_value" ] && { REGISTRY_TYPE="$nested_value"; export REGISTRY_TYPE; }
 
+    nested_value=$(get_nested_yaml_value "registry" "registry_token" "$config_file")
+    [ -n "$nested_value" ] && { REGISTRY_TOKEN="$nested_value"; export REGISTRY_TOKEN; }
+
     nested_value=$(get_nested_yaml_value "git" "repo" "$config_file")
+    if [ -z "$nested_value" ]; then
+        nested_value=$(get_nested_yaml_value "git" "git_repo" "$config_file")
+    fi
     [ -n "$nested_value" ] && { GIT_REPO="$nested_value"; export GIT_REPO; }
 
     nested_value=$(get_nested_yaml_value "git" "dev_branch" "$config_file")
