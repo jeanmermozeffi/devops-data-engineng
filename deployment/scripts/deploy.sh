@@ -1347,7 +1347,47 @@ show_interactive_menu() {
             local repository
             repository=$(get_registry_repository)
             local api_url="https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100"
-            local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-" | sort -rV)
+            local response
+            response=$(curl -s "$api_url")
+            local tags
+            tags=$(DOCKERHUB_RESPONSE="$response" python3 - "$env" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime
+
+env = sys.argv[1]
+try:
+    data = json.loads(os.environ.get("DOCKERHUB_RESPONSE", "{}"))
+except Exception:
+    sys.exit(2)
+items = data.get("results", [])
+out = []
+for it in items:
+    name = it.get("name", "")
+    if not name.startswith(env + "-"):
+        continue
+    last = it.get("last_updated") or it.get("tag_last_pushed") or ""
+    if last:
+        try:
+            dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            last = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+    if not last:
+        last = "date inconnue"
+    out.append((name, last))
+
+out.sort(key=lambda x: x[0], reverse=True)
+for name, last in out:
+    print(f"{name}|{last}")
+PY
+)
+            local parse_status=$?
+            if [ $parse_status -ne 0 ]; then
+                log_warn "Réponse Docker Hub invalide"
+                version="${env}-latest"
+            fi
 
             if [ -z "$tags" ]; then
                 log_warn "Aucun tag trouvé, utilisation de ${env}-latest"
@@ -1358,14 +1398,14 @@ show_interactive_menu() {
                 # Afficher les tags avec numérotation
                 local tags_array=()
                 local count=1
-                while IFS= read -r tag; do
+                while IFS='|' read -r tag tag_date; do
                     tags_array+=("$tag")
                     if [[ "$tag" == *"-latest" ]]; then
-                        echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC}"
+                        echo -e "  ${GREEN}$count)${NC} ${WHITE}$tag${NC} ${CYAN}(recommandé)${NC} - $tag_date"
                     elif [[ "$tag" =~ -v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                        echo -e "  ${GREEN}$count)${NC} ${CYAN}$tag${NC}"
+                        echo -e "  ${GREEN}$count)${NC} ${CYAN}$tag${NC} - $tag_date"
                     else
-                        echo -e "  ${GREEN}$count)${NC} $tag"
+                        echo -e "  ${GREEN}$count)${NC} $tag - $tag_date"
                     fi
                     ((count++))
                 done <<< "$tags"
