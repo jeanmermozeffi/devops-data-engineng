@@ -547,8 +547,9 @@ get_env_file() {
         local encrypted_env="$DEPLOYMENT_DIR/.env.${env}.encrypted"
         local temp_env="/tmp/.env.${env}.$$"
 
-        # Vérifier si le fichier chiffré existe
-        if [ -f "$encrypted_env" ]; then
+        # Vérifier si le fichier chiffré existe ET est non vide (-s)
+        # Un fichier de 0 octet est un placeholder (package minimal) → fallback sur .env plain
+        if [ -f "$encrypted_env" ] && [ -s "$encrypted_env" ]; then
             log_info "Environnement serveur détecté - déchiffrement de .env.$env..." >&2
 
             # Vérifier si env-encrypt.py existe
@@ -1837,9 +1838,15 @@ interactive_menu() {
                 env=$(choose_environment)
                 if [ $? -eq 0 ]; then
                     echo ""
-                    read -p "Confirmer l'arrêt de l'environnement $env? (yes/n): " confirm
+                    read -p "Confirmer l'arrêt de l'environnement $env? (yes/n): " confirm || confirm=""
                     if [ "$confirm" == "yes" ]; then
-                        cmd_stop "$env"
+                        echo ""
+                        read -p "Supprimer aussi les volumes? (y/N): " del_volumes || del_volumes=""
+                        if [[ "$del_volumes" =~ ^[Yy]$ ]]; then
+                            cmd_stop "$env" "true"
+                        else
+                            cmd_stop "$env" "false"
+                        fi
                     else
                         log_info "Arrêt annulé"
                     fi
@@ -2152,7 +2159,16 @@ cmd_deploy() {
 
     # Arrêter les conteneurs existants
     log_info "Arrêt des conteneurs existants..."
-    docker compose $(get_compose_files "$env") down || true
+    docker compose $(get_compose_files "$env") down 2>/dev/null || true
+
+    # Fallback: forcer la suppression des conteneurs résiduels par pattern de nom
+    # (nécessaire si docker compose ne trouve pas les conteneurs via ses labels)
+    local residual_containers
+    residual_containers=$(docker ps -a --filter "name=${PROJECT_NAME}-" --format '{{.Names}}' 2>/dev/null | grep -- "-${env}" || true)
+    if [ -n "$residual_containers" ]; then
+        log_info "Suppression des conteneurs résiduels..."
+        echo "$residual_containers" | xargs docker rm -f 2>/dev/null || true
+    fi
 
     # Télécharger l'image (sauf pour monitoring qui utilise des images officielles)
     if [ "${STACK_TYPE}" = "monitoring" ]; then
@@ -2262,29 +2278,95 @@ cmd_logs() {
     local service=${2:-}
 
     export_compose_vars "$env"
-
     cd "$DEPLOYMENT_DIR"
+
+    # Vérifier si docker compose peut trouver les conteneurs via ses labels de projet
+    local compose_ids
+    compose_ids=$(docker compose $(get_compose_files "$env") ps -q 2>/dev/null) || true
+
     if [ -n "$service" ]; then
         log_header "LOGS - $service ($env)"
-        docker compose $(get_compose_files "$env") logs -f "$service"
+        if [ -n "$compose_ids" ]; then
+            docker compose $(get_compose_files "$env") logs -f "$service"
+        else
+            # Fallback: docker logs direct — pattern: PROJECT-service_tiret-ENV
+            local container="${PROJECT_NAME}-${service//_/-}-${env}"
+            if docker inspect "$container" >/dev/null 2>&1; then
+                log_info "docker compose ne trouve pas les conteneurs — utilisation de docker logs pour '$container'"
+                docker logs -f "$container"
+            else
+                log_warn "Conteneur '$container' non trouvé, tentative docker compose..."
+                docker compose $(get_compose_files "$env") logs -f "$service"
+            fi
+        fi
     else
         log_header "LOGS - tous les services ($env)"
-        docker compose $(get_compose_files "$env") logs -f
+        if [ -n "$compose_ids" ]; then
+            docker compose $(get_compose_files "$env") logs -f
+        else
+            # Fallback: chercher les conteneurs par pattern de nom (PROJECT_NAME-*-ENV)
+            local containers
+            containers=$(docker ps --filter "name=${PROJECT_NAME}-" --format '{{.Names}}' 2>/dev/null | grep -- "-${env}" || true)
+            if [ -n "$containers" ]; then
+                log_info "docker compose ne trouve pas les conteneurs — utilisation de docker logs direct"
+                log_info "Conteneurs: $(echo "$containers" | tr '\n' ' ')"
+                log_info "Appuyez sur Ctrl+C pour arrêter"
+                sleep 1
+                # Lancer docker logs -f en parallèle pour chaque conteneur
+                local pids=()
+                trap 'kill "${pids[@]}" 2>/dev/null; trap - INT TERM' INT TERM
+                while IFS= read -r c; do
+                    docker logs -f "$c" 2>&1 | sed "s/^/[${c}] /" &
+                    pids+=($!)
+                done <<< "$containers"
+                wait "${pids[@]}" 2>/dev/null || true
+                trap - INT TERM
+            else
+                log_warn "Aucun conteneur trouvé pour ${PROJECT_NAME}-*-${env}"
+                docker compose $(get_compose_files "$env") logs -f
+            fi
+        fi
     fi
 }
 
 # Arrêter les services
+# Usage: cmd_stop <env> [true|false]  (with_volumes, défaut: false)
 cmd_stop() {
     local env=$1
+    local with_volumes=${2:-false}
 
     export_compose_vars "$env"
 
     log_header "ARRÊT - Environnement: $env"
 
     cd "$DEPLOYMENT_DIR"
-    docker compose $(get_compose_files "$env") down
+    if [ "$with_volumes" = "true" ]; then
+        docker compose $(get_compose_files "$env") down -v 2>/dev/null || true
+    else
+        docker compose $(get_compose_files "$env") down 2>/dev/null || true
+    fi
 
-    log_success "Services arrêtés"
+    # Fallback: forcer la suppression des conteneurs résiduels par pattern de nom
+    # (nécessaire si docker compose ne trouve pas les conteneurs via ses labels)
+    local containers
+    containers=$(docker ps -a --filter "name=${PROJECT_NAME}-" --format '{{.Names}}' 2>/dev/null | grep -- "-${env}" || true)
+    if [ -n "$containers" ]; then
+        log_info "Suppression des conteneurs résiduels..."
+        echo "$containers" | xargs docker rm -f 2>/dev/null || true
+    fi
+
+    if [ "$with_volumes" = "true" ]; then
+        # Supprimer les volumes nommés correspondants
+        local vols
+        vols=$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep "^${PROJECT_NAME}-" | grep -- "-${env}" || true)
+        if [ -n "$vols" ]; then
+            log_info "Suppression des volumes..."
+            echo "$vols" | xargs docker volume rm 2>/dev/null || true
+        fi
+        log_success "Services arrêtés et volumes supprimés"
+    else
+        log_success "Services arrêtés (volumes conservés)"
+    fi
 }
 
 # Redémarrer les services
