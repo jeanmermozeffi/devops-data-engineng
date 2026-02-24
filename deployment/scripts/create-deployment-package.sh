@@ -660,14 +660,29 @@ EOFPROFILE
             _create_basic_profiles
         fi
     elif [ -d "$PROFILES_DIR_DEVOPS" ] && [ -n "$(ls -A "$PROFILES_DIR_DEVOPS" 2>/dev/null)" ]; then
-        profile_count=$(_copy_profiles_from "$PROFILES_DIR_DEVOPS")
-        if [ "$profile_count" -gt 0 ]; then
-            log_success "✓ $profile_count profil(s) copié(s) depuis les scripts devops ($PROFILES_DIR_DEVOPS)"
-            log_info "  Tokens et configuration préservés"
-        else
-            log_info "  Création de profils de base..."
-            _create_basic_profiles
-        fi
+        # Recréer les profils avec le bon IMAGE_NAME du projet courant,
+        # mais en injectant les credentials (tokens) depuis les profils devops-scripts
+        _create_basic_profiles
+        # Injecter les credentials depuis les profils source
+        for src_profile in "$PROFILES_DIR_DEVOPS"/*.env; do
+            [ -f "$src_profile" ] || continue
+            local bname
+            bname=$(basename "$src_profile")
+            local dst_profile="$PACKAGE_DIR/scripts/.registry-profiles/$bname"
+            [ -f "$dst_profile" ] || continue
+            # Extraire les credentials depuis le profil source
+            local src_token src_password src_github
+            src_token=$(grep "^REGISTRY_TOKEN=" "$src_profile" | cut -d'=' -f2-)
+            src_password=$(grep "^REGISTRY_PASSWORD=" "$src_profile" | cut -d'=' -f2-)
+            src_github=$(grep "^GITHUB_TOKEN=" "$src_profile" | cut -d'=' -f2-)
+            # Injecter dans le profil destination (remplace les lignes vides)
+            [ -n "$src_token" ]    && sed_inplace "s|^REGISTRY_TOKEN=.*|REGISTRY_TOKEN=${src_token}|" "$dst_profile"
+            [ -n "$src_password" ] && sed_inplace "s|^REGISTRY_PASSWORD=.*|REGISTRY_PASSWORD=${src_password}|" "$dst_profile"
+            [ -n "$src_github" ]   && sed_inplace "s|^GITHUB_TOKEN=.*|GITHUB_TOKEN=${src_github}|" "$dst_profile"
+        done
+        profile_count=$(find "$PACKAGE_DIR/scripts/.registry-profiles" -name "*.env" | wc -l)
+        log_success "✓ $profile_count profil(s) générés pour le projet (credentials depuis devops-scripts)"
+        log_info "  IMAGE_NAME=${IMAGE_NAME} — tokens préservés"
     else
         log_info "Aucun profil existant détecté, création de profils de base..."
         _create_basic_profiles
