@@ -68,6 +68,17 @@ print_separator() {
     echo -e "${CYAN}----------------------------------------${NC}"
 }
 
+# Description lisible du type de registry
+get_registry_description() {
+    case "${1:-}" in
+        dockerhub) echo "dockerhub (docker.io)" ;;
+        github) echo "github (ghcr.io)" ;;
+        gitlab) echo "gitlab" ;;
+        custom) echo "custom" ;;
+        *) echo "${1:-inconnu}" ;;
+    esac
+}
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -94,8 +105,9 @@ fi
 
 # DEPLOYMENT_DIR relatif au projet
 DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-$PROJECT_ROOT/deployment}"
-# Fallback: package minimal (fichiers à la racine)
-if [ ! -d "$DEPLOYMENT_DIR" ] && [ -f "$PROJECT_ROOT/.env.registry" ]; then
+# Fallback: package minimal — les fichiers docker-compose sont à la racine du projet
+# (le dossier deployment/ peut exister mais ne contenir que monitoring/, pas les compose)
+if [ ! -f "$DEPLOYMENT_DIR/docker-compose.registry.yml" ] && [ -f "$PROJECT_ROOT/docker-compose.registry.yml" ]; then
     DEPLOYMENT_DIR="$PROJECT_ROOT"
 fi
 
@@ -242,6 +254,92 @@ load_profile_by_name() {
     return 1
 }
 
+# Créer un profil de manière interactive (appelé depuis load_profile)
+# IMPORTANT: doit être défini AVANT load_profile() car appelé lors de l'init (ligne ~404)
+create_profile_interactive() {
+    log_header "Création d'un nouveau profil (credentials)" >&2
+
+    # Afficher les infos du projet depuis .devops.yml
+    echo -e "${CYAN}Configuration projet (depuis .devops.yml):${NC}" >&2
+    echo -e "  Registry URL: ${WHITE}${REGISTRY_URL:-non défini}${NC}" >&2
+    echo -e "  Username: ${WHITE}${REGISTRY_USERNAME:-non défini}${NC}" >&2
+    echo -e "  Image: ${WHITE}${IMAGE_NAME:-non défini}${NC}" >&2
+    echo "" >&2
+    print_separator >&2
+    echo "" >&2
+
+    # Demander le nom du profil
+    read -p "Nom du profil [dockerhub-dev]: " profile_name >&2
+    profile_name=${profile_name:-dockerhub-dev}
+
+    # Vérifier si le profil existe déjà
+    if [ -f "$PROFILES_DIR/${profile_name}.env" ] || [ -f "$PROFILES_DIR/${profile_name}.env.encrypted" ]; then
+        log_warn "Un profil '$profile_name' existe déjà" >&2
+        read -p "Voulez-vous l'écraser? (y/N): " overwrite >&2
+        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+            log_info "Création annulée" >&2
+            return 1
+        fi
+        # Supprimer les anciennes versions
+        rm -f "$PROFILES_DIR/${profile_name}.env"
+        rm -f "$PROFILES_DIR/${profile_name}.env.encrypted"
+    fi
+
+    # Demander UNIQUEMENT les credentials
+    echo "" >&2
+    echo -e "${CYAN}Type de registry:${NC}" >&2
+    echo "  1) Docker Hub" >&2
+    echo "  2) GitLab Container Registry" >&2
+    echo "  3) GitHub Container Registry" >&2
+    echo "  4) Custom" >&2
+    read -p "Choix [1]: " reg_choice >&2
+
+    local reg_type
+    case "${reg_choice:-1}" in
+        1) reg_type="dockerhub" ;;
+        2) reg_type="gitlab" ;;
+        3) reg_type="github" ;;
+        4) reg_type="custom" ;;
+        *) reg_type="dockerhub" ;;
+    esac
+
+    echo "" >&2
+    echo -e "${CYAN}Authentification:${NC}" >&2
+    read -p "Registry Token (optionnel): " reg_token >&2
+    read -sp "Registry Password (optionnel): " reg_password >&2
+    echo "" >&2
+    read -p "GitHub Token (optionnel, pour repos privés): " github_token >&2
+
+    # Créer le dossier s'il n'existe pas
+    mkdir -p "$PROFILES_DIR"
+
+    # Créer le profil avec UNIQUEMENT les credentials
+    local current_date=$(date)
+    cat > "$PROFILES_DIR/${profile_name}.env" <<EOF
+# Profil Registry: ${profile_name}
+# Type: ${reg_type}
+# Créé le: ${current_date}
+#
+# NOTE: Ce profil contient uniquement les credentials.
+# Les informations du projet (registry_url, registry_username, image_name, etc.)
+# sont chargées depuis le fichier .devops.yml du projet.
+
+REGISTRY_TYPE=${reg_type}
+REGISTRY_TOKEN=${reg_token}
+REGISTRY_PASSWORD=${reg_password}
+GITHUB_TOKEN=${github_token}
+EOF
+
+    log_success "Profil '$profile_name' créé avec succès!" >&2
+    log_info "Les infos du projet sont lues depuis .devops.yml" >&2
+
+    # Définir comme profil par défaut
+    echo "$profile_name" > "$LAST_PROFILE_FILE"
+
+    # Chiffrer le profil pour protéger les secrets
+    encrypt_profile "$profile_name" >&2
+}
+
 # Charger le dernier profil utilisé si disponible
 load_profile() {
     local tried_profile=""
@@ -280,8 +378,12 @@ load_profile() {
         fi
     fi
 
-    # Fallback: chercher .env.registry (legacy)
+    # Fallback: chercher .env.registry (legacy ou package minimal)
+    # Vérifier dans DEPLOYMENT_DIR d'abord, puis à la racine du projet
     local legacy_config="$DEPLOYMENT_DIR/.env.registry"
+    if [ ! -f "$legacy_config" ] && [ -f "$PROJECT_ROOT/.env.registry" ]; then
+        legacy_config="$PROJECT_ROOT/.env.registry"
+    fi
     if [ -f "$legacy_config" ]; then
         log_warn "Utilisation du fichier legacy .env.registry" >&2
         log_info "Migrez vers les profils avec: ./scripts/registry.sh profile create" >&2
@@ -320,6 +422,22 @@ load_profile() {
         fi
         CURRENT_PROFILE="legacy"
         return 0
+    fi
+
+    # Fallback: auto-charger le premier profil disponible dans PROFILES_DIR (pas de .current)
+    if [ -d "$PROFILES_DIR" ]; then
+        local first_profile
+        first_profile=$(find "$PROFILES_DIR" -maxdepth 1 -name "*.env" ! -name ".*" | sort | head -1)
+        if [ -n "$first_profile" ]; then
+            local auto_name
+            auto_name=$(basename "$first_profile" .env)
+            if load_credentials_from_file "$first_profile"; then
+                CURRENT_PROFILE="$auto_name"
+                echo "$auto_name" > "$LAST_PROFILE_FILE"
+                log_info "Profil auto-détecté: $auto_name" >&2
+                return 0
+            fi
+        fi
     fi
 
     # Aucun profil trouvé - Vérifier si .devops.yml a les infos nécessaires
@@ -366,8 +484,33 @@ load_profile() {
     return 1
 }
 
+# En mode package minimal (sans .devops.yml), compléter les infos projet
+# depuis .env.registry si elles sont absentes.
+hydrate_project_config_from_legacy() {
+    local legacy_config="$DEPLOYMENT_DIR/.env.registry"
+    [ -f "$legacy_config" ] || return 0
+
+    if [ -z "$REGISTRY_URL" ]; then
+        REGISTRY_URL=$(grep "^REGISTRY_URL=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$REGISTRY_USERNAME" ]; then
+        REGISTRY_USERNAME=$(grep "^REGISTRY_USERNAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$IMAGE_NAME" ]; then
+        IMAGE_NAME=$(grep "^IMAGE_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$PROJECT_NAME" ]; then
+        PROJECT_NAME=$(grep "^PROJECT_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$COMPOSE_PROJECT_NAME" ]; then
+        COMPOSE_PROJECT_NAME=$(grep "^COMPOSE_PROJECT_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+}
+
 # Charger le profil
 load_profile || exit 1
+# Compléter les variables projet après chargement d'un profil
+hydrate_project_config_from_legacy
 
 # ============================================================================
 # FONCTIONS UTILITAIRES
@@ -1044,91 +1187,6 @@ show_current_profile() {
     echo -e "  Prod Branch: ${WHITE}${PROD_BRANCH:-main}${NC}"
 }
 
-# Créer un profil de manière interactive (appelé depuis load_profile)
-create_profile_interactive() {
-    log_header "Création d'un nouveau profil (credentials)" >&2
-
-    # Afficher les infos du projet depuis .devops.yml
-    echo -e "${CYAN}Configuration projet (depuis .devops.yml):${NC}" >&2
-    echo -e "  Registry URL: ${WHITE}${REGISTRY_URL:-non défini}${NC}" >&2
-    echo -e "  Username: ${WHITE}${REGISTRY_USERNAME:-non défini}${NC}" >&2
-    echo -e "  Image: ${WHITE}${IMAGE_NAME:-non défini}${NC}" >&2
-    echo "" >&2
-    print_separator >&2
-    echo "" >&2
-
-    # Demander le nom du profil
-    read -p "Nom du profil [dockerhub-dev]: " profile_name >&2
-    profile_name=${profile_name:-dockerhub-dev}
-
-    # Vérifier si le profil existe déjà
-    if [ -f "$PROFILES_DIR/${profile_name}.env" ] || [ -f "$PROFILES_DIR/${profile_name}.env.encrypted" ]; then
-        log_warn "Un profil '$profile_name' existe déjà" >&2
-        read -p "Voulez-vous l'écraser? (y/N): " overwrite >&2
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            log_info "Création annulée" >&2
-            return 1
-        fi
-        # Supprimer les anciennes versions
-        rm -f "$PROFILES_DIR/${profile_name}.env"
-        rm -f "$PROFILES_DIR/${profile_name}.env.encrypted"
-    fi
-
-    # Demander UNIQUEMENT les credentials
-    echo "" >&2
-    echo -e "${CYAN}Type de registry:${NC}" >&2
-    echo "  1) Docker Hub" >&2
-    echo "  2) GitLab Container Registry" >&2
-    echo "  3) GitHub Container Registry" >&2
-    echo "  4) Custom" >&2
-    read -p "Choix [1]: " reg_choice >&2
-
-    local reg_type
-    case "${reg_choice:-1}" in
-        1) reg_type="dockerhub" ;;
-        2) reg_type="gitlab" ;;
-        3) reg_type="github" ;;
-        4) reg_type="custom" ;;
-        *) reg_type="dockerhub" ;;
-    esac
-
-    echo "" >&2
-    echo -e "${CYAN}Authentification:${NC}" >&2
-    read -p "Registry Token (optionnel): " reg_token >&2
-    read -sp "Registry Password (optionnel): " reg_password >&2
-    echo "" >&2
-    read -p "GitHub Token (optionnel, pour repos privés): " github_token >&2
-
-    # Créer le dossier s'il n'existe pas
-    mkdir -p "$PROFILES_DIR"
-
-    # Créer le profil avec UNIQUEMENT les credentials
-    local current_date=$(date)
-    cat > "$PROFILES_DIR/${profile_name}.env" <<EOF
-# Profil Registry: ${profile_name}
-# Type: ${reg_type}
-# Créé le: ${current_date}
-#
-# NOTE: Ce profil contient uniquement les credentials.
-# Les informations du projet (registry_url, registry_username, image_name, etc.)
-# sont chargées depuis le fichier .devops.yml du projet.
-
-REGISTRY_TYPE=${reg_type}
-REGISTRY_TOKEN=${reg_token}
-REGISTRY_PASSWORD=${reg_password}
-GITHUB_TOKEN=${github_token}
-EOF
-
-    log_success "Profil '$profile_name' créé avec succès!" >&2
-    log_info "Les infos du projet sont lues depuis .devops.yml" >&2
-
-    # Définir comme profil par défaut
-    echo "$profile_name" > "$LAST_PROFILE_FILE"
-
-    # Chiffrer le profil pour protéger les secrets
-    encrypt_profile "$profile_name" >&2
-}
-
 # Créer un nouveau profil (credentials uniquement)
 create_profile() {
     log_header "Créer un nouveau profil (credentials)"
@@ -1287,6 +1345,7 @@ switch_profile() {
     mkdir -p "$PROFILES_DIR"
     echo "$profile_name" > "$LAST_PROFILE_FILE"
     echo "$profile_name" > "$PROFILES_DIR/.last"
+    hydrate_project_config_from_legacy
 
     log_success "Profil '$profile_name' chargé et activé"
     log_info "Type: $(get_registry_description "$REGISTRY_TYPE")"
@@ -1731,7 +1790,7 @@ interactive_menu() {
                     export_compose_vars "$env"
                     # Lire dynamiquement les services depuis les fichiers docker-compose
                     local services_list
-                    services_list=$(cd "$DEPLOYMENT_DIR" && docker compose $(get_compose_files "$env") config --services 2>/dev/null)
+                    services_list=$(cd "$DEPLOYMENT_DIR" && docker compose $(get_compose_files "$env") config --services 2>/dev/null) || true
                     if [ -z "$services_list" ]; then
                         log_warn "Impossible de lire les services. Vérifiez que les fichiers docker-compose existent."
                         read -p "Appuyez sur Entrée pour revenir au menu principal..."
@@ -2058,7 +2117,7 @@ cmd_deploy() {
 
     # Auto-clean optionnel: arrêter un éventuel déploiement local pour éviter les conflits
     echo ""
-    read -p "Nettoyer le déploiement local avant le deploy registry? (y/N): " clean_local
+    read -p "Nettoyer le déploiement local avant le deploy registry? (y/N): " clean_local || clean_local=""
     if [[ "$clean_local" =~ ^[Yy]$ ]]; then
         log_info "Nettoyage du déploiement local (si présent)..."
         docker compose -f docker-compose.yml -f docker-compose.$env.yml down -v 2>/dev/null || true
@@ -2168,6 +2227,18 @@ export_compose_vars() {
     export WORKDIR="${WORKDIR}"
     export ENV_FILE_PATH
     ENV_FILE_PATH="$(get_compose_env_file_path "$env")"
+
+    # IMAGE_FULL et IMAGE_TAG : nécessaires pour valider le compose YAML
+    # (utiliser le tag par défaut si non définis par cmd_deploy)
+    if [ -z "${IMAGE_FULL:-}" ]; then
+        export IMAGE_FULL
+        IMAGE_FULL="$(build_image_full "$env" "${env}-latest")"
+    fi
+    if [ -z "${IMAGE_TAG:-}" ]; then
+        local default_tag
+        default_tag="$(resolve_compose_image_tag "$env" "${env}-latest")"
+        export IMAGE_TAG="${default_tag}"
+    fi
 
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
