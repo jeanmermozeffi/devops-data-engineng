@@ -126,6 +126,11 @@ DEV_BRANCH="${DEV_BRANCH:-dev}"
 STAGING_BRANCH="${STAGING_BRANCH:-staging}"
 PROD_BRANCH="${PROD_BRANCH:-main}"
 REGISTRY_TYPE="${REGISTRY_TYPE:-dockerhub}"
+# Buildx attestations (configurable via .devops.yml: buildx_provenance/buildx_sbom)
+# Empty = auto mode. For Docker Hub we default to false to avoid intermittent 400
+# errors seen on some push paths/proxies when attestations are enabled.
+BUILDX_PROVENANCE="${BUILDX_PROVENANCE:-}"
+BUILDX_SBOM="${BUILDX_SBOM:-}"
 
 # ============================================================================
 # CONFIGURATIONS DES REGISTRIES
@@ -1294,6 +1299,26 @@ cmd_build_push_multiarch() {
         "--push"  # Push directement sans charger localement
     )
 
+    # Attestations Buildx (provenance/SBOM) :
+    # - configurable via .devops.yml (buildx_provenance/buildx_sbom) ou variables d'env
+    # - par défaut désactivées sur Docker Hub pour éviter des erreurs 400 intermittentes au push
+    local buildx_provenance="${BUILDX_PROVENANCE:-}"
+    local buildx_sbom="${BUILDX_SBOM:-}"
+    if [ -z "$buildx_provenance" ] && [ "$REGISTRY_TYPE" == "dockerhub" ]; then
+        buildx_provenance="false"
+    fi
+    if [ -z "$buildx_sbom" ] && [ "$REGISTRY_TYPE" == "dockerhub" ]; then
+        buildx_sbom="false"
+    fi
+    if [ -n "$buildx_provenance" ]; then
+        build_args+=("--provenance=$buildx_provenance")
+        log_info "Buildx provenance: $buildx_provenance"
+    fi
+    if [ -n "$buildx_sbom" ]; then
+        build_args+=("--sbom=$buildx_sbom")
+        log_info "Buildx SBOM: $buildx_sbom"
+    fi
+
     # Ajouter le token GitHub/GitLab comme secret si disponible (sécurisé)
     local secret_args=()
     local secret_file=""
@@ -1943,6 +1968,8 @@ ${CYAN}CONFIGURATION:${NC}
     GITHUB_TOKEN=ghp_xxx
     DEV_BRANCH=develop
     PROD_BRANCH=main
+    BUILDX_PROVENANCE=false|true|mode=max
+    BUILDX_SBOM=false|true
 
 ${CYAN}ENVIRONNEMENTS:${NC}
     dev     Environnement de développement
