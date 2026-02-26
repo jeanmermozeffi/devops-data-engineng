@@ -554,6 +554,22 @@ create_package() {
         mkdir -p "$PACKAGE_DIR/docker"
         cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker/"
         log_success "✓ docker/docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
+
+        # Copier les scripts SQL RH requis par docker-compose.rh.yml
+        RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
+        if [ ! -d "$RH_SQL_SRC_DIR" ]; then
+            RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/database-rh/initdb"
+        fi
+
+        if [ -d "$RH_SQL_SRC_DIR" ] && ls "$RH_SQL_SRC_DIR"/*.sql >/dev/null 2>&1; then
+            mkdir -p "$PACKAGE_DIR/docker/database-rh/initdb"
+            cp "$RH_SQL_SRC_DIR"/*.sql "$PACKAGE_DIR/docker/database-rh/initdb/"
+            RH_SQL_COUNT=$(ls -1 "$PACKAGE_DIR/docker/database-rh/initdb/"*.sql 2>/dev/null | wc -l | tr -d ' ')
+            log_success "✓ Scripts SQL RH copiés: $RH_SQL_COUNT fichier(s)"
+        else
+            log_error "❌ Scripts SQL RH introuvables (attendu dans docker/database-rh/initdb ou database-rh/initdb)"
+            exit 1
+        fi
     else
         log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
     fi
