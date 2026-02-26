@@ -428,6 +428,22 @@ create_package() {
         log_info "Aucune ressource locale détectée (images officielles uniquement)"
     fi
 
+    # Forcer la copie du fichier Superset config si présent
+    # (évite le cas où Docker crée un dossier config/superset_config.py si le fichier manque)
+    local superset_config_src="$PROJECT_DIR/config/superset_config.py"
+    local superset_config_dest_dir="$PACKAGE_DIR/config"
+    local superset_config_dest="$superset_config_dest_dir/superset_config.py"
+    if [ -f "$superset_config_src" ]; then
+        mkdir -p "$superset_config_dest_dir"
+        if [ -d "$superset_config_dest" ]; then
+            rm -rf "$superset_config_dest"
+        fi
+        cp "$superset_config_src" "$superset_config_dest"
+        log_success "✓ config/superset_config.py copié (forcé)"
+    else
+        log_warn "⚠️  config/superset_config.py introuvable dans le projet"
+    fi
+
     # Copier les vrais fichiers .env depuis la racine du projet
     log_info "📋 Copie des fichiers .env réels (seront auto-chiffrés sur le serveur)..."
     echo ""
@@ -1021,6 +1037,17 @@ chmod +x scripts/*.sh 2>/dev/null || true
 # Créer les répertoires nécessaires
 mkdir -p logs
 
+# Vérifier la présence du fichier Superset config
+if [ -d "config/superset_config.py" ]; then
+    echo -e "${YELLOW}Erreur: config/superset_config.py est un dossier (doit être un fichier).${NC}"
+    echo -e "${YELLOW}Supprimez ce dossier (sudo) et réinstallez le package.${NC}"
+    exit 1
+fi
+if [ ! -f "config/superset_config.py" ]; then
+    echo -e "${YELLOW}Attention: config/superset_config.py manquant.${NC}"
+    echo -e "${YELLOW}Le montage Docker créera un dossier et Superset ne démarrera pas.${NC}"
+fi
+
 # Préparer l'environnement virtuel pour les outils Superset (si présents)
 if [ -f "scripts/superset_manager.py" ]; then
     if ! command -v python3 >/dev/null 2>&1; then
@@ -1335,6 +1362,34 @@ clean_server() {
     echo ""
     log_info "Nettoyage du serveur en cours..."
 
+    local remote_cleanup_cmd
+    remote_cleanup_cmd=$(cat <<'EOF'
+TARGET_PATH="$1"
+if [ ! -d "$TARGET_PATH" ]; then
+    echo "TARGET_MISSING"
+    exit 0
+fi
+
+if sudo -n true >/dev/null 2>&1; then
+    sudo find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+else
+    find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + || true
+fi
+
+remaining=$(find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true)
+if [ -n "$remaining" ]; then
+    echo "CLEANUP_INCOMPLETE"
+    find "$TARGET_PATH" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true
+    exit 2
+fi
+
+echo "CLEANUP_OK"
+EOF
+)
+
+    local cleanup_output=""
+    local cleanup_rc=0
+
     # Exécuter le nettoyage
     if [ "$SSH_USE_PASSWORD" == "true" ]; then
         # Avec mot de passe
@@ -1346,17 +1401,59 @@ clean_server() {
         read -s -p "Mot de passe SSH: " SSH_PASSWORD
         echo ""
 
-        sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-            "rm -rf ${SSH_PATH}/* ${SSH_PATH}/.* 2>/dev/null || true"
+        cleanup_output=$(
+            sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+                "bash -s -- '$SSH_PATH'" <<<"$remote_cleanup_cmd"
+        ) || cleanup_rc=$?
     else
         # Avec clé SSH
-        ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-            "rm -rf ${SSH_PATH}/* ${SSH_PATH}/.* 2>/dev/null || true"
+        cleanup_output=$(
+            ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+                "bash -s -- '$SSH_PATH'" <<<"$remote_cleanup_cmd"
+        ) || cleanup_rc=$?
     fi
 
     echo ""
-    log_success "Serveur nettoyé : ${SSH_PATH}"
-    log_info "Le dossier est maintenant vide"
+    if printf '%s\n' "$cleanup_output" | grep -q "^CLEANUP_OK$"; then
+        log_success "Serveur nettoyé : ${SSH_PATH}"
+        log_info "Le dossier est maintenant vide"
+    elif printf '%s\n' "$cleanup_output" | grep -q "^TARGET_MISSING$"; then
+        log_warn "Chemin distant absent : ${SSH_PATH} (rien à nettoyer)"
+    else
+        if ask_yes_no "Permissions insuffisantes. Tenter un nettoyage sudo interactif" "y"; then
+            log_info "Tentative sudo interactive..."
+            cleanup_output=""
+            cleanup_rc=0
+
+            if [ "$SSH_USE_PASSWORD" == "true" ]; then
+                cleanup_output=$(
+                    sshpass -p "$SSH_PASSWORD" ssh -tt -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$SSH_PATH'"
+                ) || cleanup_rc=$?
+            else
+                cleanup_output=$(
+                    ssh $SSH_OPTIONS -tt -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
+                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$SSH_PATH'"
+                ) || cleanup_rc=$?
+            fi
+
+            if printf '%s\n' "$cleanup_output" | grep -q "^CLEANUP_OK$"; then
+                log_success "Serveur nettoyé : ${SSH_PATH}"
+                log_info "Le dossier est maintenant vide"
+                echo ""
+                return 0
+            fi
+        fi
+
+        log_error "Nettoyage incomplet sur ${SSH_PATH}"
+        log_warn "Des fichiers/répertoires n'ont pas pu être supprimés (permissions)."
+        if [ "$cleanup_rc" -ne 0 ]; then
+            log_warn "Code retour SSH: $cleanup_rc"
+        fi
+        echo ""
+        echo "$cleanup_output"
+        return 1
+    fi
     echo ""
 }
 
