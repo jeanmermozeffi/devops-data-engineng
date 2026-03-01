@@ -37,3 +37,5 @@ logs/
 cicbi-deployment-package/
 packages/
 packages/
+deployment/scripts/.registry-profiles/.current
+deployment/scripts/.registry-profiles/.last
