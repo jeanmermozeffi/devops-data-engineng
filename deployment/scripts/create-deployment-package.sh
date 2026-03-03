@@ -100,6 +100,27 @@ ENCRYPT_ENV_FILES="${ENCRYPT_ENV_FILES:-false}"
 # Inclure les outils Superset (superset_manager + exports YAML) si dispo
 INCLUDE_SUPERSET_ASSETS="${INCLUDE_SUPERSET_ASSETS:-auto}"
 
+resolve_monitoring_dir_for_package() {
+    local candidate
+    local candidates=()
+
+    candidates+=("$PROJECT_DIR/$DEPLOYMENT_SUBDIR/monitoring")
+    if [ -n "${DEVOPS_MONITORING_SOURCE:-}" ]; then
+        candidates+=("${DEVOPS_MONITORING_SOURCE}")
+    fi
+    candidates+=("$SCRIPT_DIR/../monitoring")
+    candidates+=("/Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform/deployment/monitoring")
+
+    for candidate in "${candidates[@]}"; do
+        if [ -d "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 load_env_config() {
     local env_file="$PROJECT_DIR/deployment/.env.deployment"
     local example_file="$PROJECT_DIR/deployment/.env.deployment.example"
@@ -310,14 +331,27 @@ create_package() {
         fi
     done
 
-    # Inclure aussi la stack monitoring centralisee (Option A) si presente
-    MONITORING_DIR_SRC="$COMPOSE_SRC/monitoring"
-    if [ -d "$MONITORING_DIR_SRC" ]; then
+    # Inclure les composants monitoring cote projet (agents uniquement)
+    MONITORING_DIR_SRC="$(resolve_monitoring_dir_for_package || true)"
+    if [ -n "$MONITORING_DIR_SRC" ] && [ -d "$MONITORING_DIR_SRC" ]; then
         mkdir -p "$PACKAGE_DIR/deployment"
-        cp -r "$MONITORING_DIR_SRC" "$PACKAGE_DIR/deployment/"
-        log_success "✓ deployment/monitoring copié (Option A)"
+        mkdir -p "$PACKAGE_DIR/deployment/monitoring"
+
+        if [ -f "$MONITORING_DIR_SRC/README.md" ]; then
+            cp "$MONITORING_DIR_SRC/README.md" "$PACKAGE_DIR/deployment/monitoring/"
+        fi
+        if [ -f "$MONITORING_DIR_SRC/compose-labels-snippet.yml" ]; then
+            cp "$MONITORING_DIR_SRC/compose-labels-snippet.yml" "$PACKAGE_DIR/deployment/monitoring/"
+        fi
+        if [ -d "$MONITORING_DIR_SRC/agents" ]; then
+            cp -r "$MONITORING_DIR_SRC/agents" "$PACKAGE_DIR/deployment/monitoring/"
+            log_success "✓ deployment/monitoring/agents copié depuis: $MONITORING_DIR_SRC"
+        else
+            log_warn "⚠️  Dossier agents non trouvé dans $MONITORING_DIR_SRC"
+        fi
     else
         log_info "Dossier deployment/monitoring non détecté (optionnel)"
+        log_info "Définissez DEVOPS_MONITORING_SOURCE pour forcer la source monitoring"
     fi
 
     # Ajuster les chemins relatifs dans les fichiers docker-compose pour le package minimal
@@ -605,6 +639,8 @@ IMAGE_NAME=${IMAGE_NAME}
 # Configuration projet (depuis .devops.yml)
 PROJECT_NAME=${PROJECT_NAME}
 COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}
+STACK_TYPE=${STACK_TYPE}
+LABEL_NAMESPACE=${LABEL_NAMESPACE}
 
 # Configuration application
 APP_ENTRYPOINT=${APP_ENTRYPOINT}

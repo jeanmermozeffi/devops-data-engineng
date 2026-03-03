@@ -1,0 +1,131 @@
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: monitoring-agent-node-exporter-${AGENT_ENV}
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.rootfs=/rootfs
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "${NODE_EXPORTER_PORT}:9100"
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=node-exporter
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    container_name: monitoring-agent-cadvisor-${AGENT_ENV}
+    restart: unless-stopped
+    privileged: true
+    cgroup: host
+    command:
+      - --docker_only=true
+      - --store_container_labels=true
+      - --whitelisted_container_labels=cic.project,cic.env,cic.service,com.docker.compose.project,com.docker.compose.service,com.monitoring.env
+    volumes:
+      - /:/rootfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "${CADVISOR_PORT}:8080"
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=cadvisor
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    container_name: monitoring-agent-promtail-${AGENT_ENV}
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/promtail/promtail.yml
+      - -config.expand-env=true
+    environment:
+      - AGENT_HOST=${AGENT_HOST}
+      - AGENT_ENV=${AGENT_ENV}
+      - AGENT_REGION=${AGENT_REGION}
+      - AGENT_PROJECT_DEFAULT=${AGENT_PROJECT_DEFAULT}
+      - LOKI_PUSH_URL=${LOKI_PUSH_URL}
+    volumes:
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail_positions:/tmp
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=promtail
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: monitoring-agent-postgres-exporter-${AGENT_ENV}
+    restart: unless-stopped
+    profiles: ["postgres"]
+    environment:
+      - DATA_SOURCE_NAME=${POSTGRES_EXPORTER_DSN}
+    ports:
+      - "${POSTGRES_EXPORTER_PORT}:9187"
+    networks:
+      - default
+      - app
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=postgres-exporter
+
+  airflow-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: monitoring-agent-airflow-exporter-${AGENT_ENV}
+    restart: unless-stopped
+    profiles: ["airflow"]
+    environment:
+      - DATA_SOURCE_NAME=${AIRFLOW_EXPORTER_DSN}
+      - PG_EXPORTER_EXTEND_QUERY_PATH=/etc/postgres-exporter/queries_airflow.yml
+      - PG_EXPORTER_DISABLE_DEFAULT_METRICS=true
+      - PG_EXPORTER_DISABLE_SETTINGS_METRICS=true
+    volumes:
+      - ./postgres-exporter/queries_airflow.yml:/etc/postgres-exporter/queries_airflow.yml:ro
+    ports:
+      - "${AIRFLOW_EXPORTER_PORT}:9187"
+    networks:
+      - default
+      - app
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=airflow-exporter
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: monitoring-agent-redis-exporter-${AGENT_ENV}
+    restart: unless-stopped
+    profiles: ["redis"]
+    command:
+      - --redis.addr=${REDIS_EXPORTER_ADDR}
+      - --redis.password=${REDIS_EXPORTER_PASSWORD}
+    ports:
+      - "${REDIS_EXPORTER_PORT}:9121"
+    networks:
+      - default
+      - app
+    labels:
+      - cic.project=${AGENT_PROJECT_DEFAULT}
+      - cic.env=${AGENT_ENV}
+      - cic.service=redis-exporter
+
+volumes:
+  promtail_positions:
+
+networks:
+  app:
+    external: true
+    name: ${APP_DOCKER_NETWORK}

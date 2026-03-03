@@ -14,6 +14,7 @@
 #   ./deploy-registry.sh stop <env>               Arrêter les services
 #   ./deploy-registry.sh restart <env>            Redémarrer les services
 #   ./deploy-registry.sh superset-import <env>    Importer les assets Superset
+#   ./deploy-registry.sh monitoring-agent <env> [action] [options]
 #
 # EXAMPLES:
 #   ./deploy-registry.sh deploy dev
@@ -420,6 +421,12 @@ load_profile() {
         if [ -z "$WORKDIR" ]; then
             WORKDIR=$(grep "^WORKDIR=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
         fi
+        if [ -z "$STACK_TYPE" ]; then
+            STACK_TYPE=$(grep "^STACK_TYPE=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
+        if [ -z "$LABEL_NAMESPACE" ]; then
+            LABEL_NAMESPACE=$(grep "^LABEL_NAMESPACE=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+        fi
         CURRENT_PROFILE="legacy"
         return 0
     fi
@@ -504,6 +511,12 @@ hydrate_project_config_from_legacy() {
     fi
     if [ -z "$COMPOSE_PROJECT_NAME" ]; then
         COMPOSE_PROJECT_NAME=$(grep "^COMPOSE_PROJECT_NAME=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$STACK_TYPE" ]; then
+        STACK_TYPE=$(grep "^STACK_TYPE=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
+    fi
+    if [ -z "$LABEL_NAMESPACE" ]; then
+        LABEL_NAMESPACE=$(grep "^LABEL_NAMESPACE=" "$legacy_config" 2>/dev/null | cut -d'=' -f2)
     fi
 }
 
@@ -2402,6 +2415,147 @@ cmd_superset_import() {
     bash "$import_script" --env "$env"
 }
 
+# Déployer/gerer l'agent monitoring projet (agents only)
+get_monitoring_agent_dir() {
+    local candidates=(
+        "$DEPLOYMENT_DIR/monitoring/agents"
+        "$PROJECT_ROOT/deployment/monitoring/agents"
+        "$PROJECT_ROOT/monitoring/agents"
+    )
+    local dir
+    for dir in "${candidates[@]}"; do
+        if [ -d "$dir" ]; then
+            echo "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
+
+prepare_monitoring_agent_env_file() {
+    local agent_dir="$1"
+    local env="$2"
+    local env_file="$agent_dir/.env"
+
+    if [ -f "$env_file" ]; then
+        echo "$env_file"
+        return 0
+    fi
+
+    if [ ! -f "$agent_dir/.env.example" ]; then
+        log_error "Fichier .env.example introuvable dans: $agent_dir"
+        return 1
+    fi
+
+    cp "$agent_dir/.env.example" "$env_file"
+    local host_name
+    host_name="$(hostname 2>/dev/null || echo "${PROJECT_NAME}-${env}-agent")"
+
+    upsert_env_var_file() {
+        local file="$1"
+        local key="$2"
+        local value="$3"
+        local tmp_file
+        tmp_file="$(mktemp)"
+        awk -v key="$key" -v value="$value" '
+            BEGIN { replaced=0 }
+            $0 ~ ("^" key "=") {
+                if (replaced == 0) {
+                    print key "=" value
+                    replaced=1
+                }
+                next
+            }
+            { print }
+            END {
+                if (replaced == 0) {
+                    print key "=" value
+                }
+            }
+        ' "$file" > "$tmp_file"
+        mv "$tmp_file" "$file"
+    }
+
+    upsert_env_var_file "$env_file" "AGENT_ENV" "${env}"
+    upsert_env_var_file "$env_file" "AGENT_PROJECT_DEFAULT" "${PROJECT_NAME}"
+    upsert_env_var_file "$env_file" "APP_DOCKER_NETWORK" "${PROJECT_NAME}-${env}-network"
+    upsert_env_var_file "$env_file" "AGENT_HOST" "${host_name}"
+
+    log_info "Fichier agent cree: $env_file"
+    log_info "Pensez a verifier les DSN exporters et LOKI_PUSH_URL."
+    echo "$env_file"
+}
+
+cmd_monitoring_agent() {
+    local env="$1"
+    local action="${2:-up}"
+    local extra="${3:-}"
+
+    local agent_dir
+    if ! agent_dir="$(get_monitoring_agent_dir)"; then
+        log_error "Dossier monitoring agent introuvable"
+        log_info "Attendu: deployment/monitoring/agents"
+        return 1
+    fi
+
+    local agent_env_file
+    agent_env_file="$(prepare_monitoring_agent_env_file "$agent_dir" "$env")" || return 1
+
+    local -a compose_cmd=(docker compose --env-file "$agent_env_file" -f "$agent_dir/docker-compose.yml")
+    local -a profile_args=()
+
+    if [[ "$action" =~ ^(up|start|deploy)$ ]]; then
+        local profiles_csv="${extra:-${MONITORING_AGENT_PROFILES:-}}"
+        if [ -n "$profiles_csv" ]; then
+            local profiles_list
+            IFS=',' read -r -a profiles_list <<< "$profiles_csv"
+            local p
+            for p in "${profiles_list[@]}"; do
+                p="$(echo "$p" | xargs)"
+                if [ -n "$p" ]; then
+                    profile_args+=(--profile "$p")
+                fi
+            done
+        fi
+    fi
+
+    log_header "MONITORING AGENT - $action ($env)"
+    log_info "Repertoire agent: $agent_dir"
+
+    case "$action" in
+        up|start|deploy)
+            "${compose_cmd[@]}" "${profile_args[@]}" up -d
+            "${compose_cmd[@]}" ps
+            log_success "Agent monitoring demarre"
+            ;;
+        down|stop)
+            "${compose_cmd[@]}" down
+            log_success "Agent monitoring arrete"
+            ;;
+        restart)
+            "${compose_cmd[@]}" restart
+            "${compose_cmd[@]}" ps
+            ;;
+        status)
+            "${compose_cmd[@]}" ps
+            ;;
+        logs)
+            if [ -n "$extra" ]; then
+                "${compose_cmd[@]}" logs -f "$extra"
+            else
+                "${compose_cmd[@]}" logs -f
+            fi
+            ;;
+        *)
+            log_error "Action monitoring-agent inconnue: $action"
+            echo "Usage: $0 monitoring-agent <env> [up|down|restart|status|logs] [profiles_csv|service]"
+            echo "Exemple: $0 monitoring-agent prod up airflow,postgres,redis"
+            echo "Exemple: $0 monitoring-agent prod logs promtail"
+            return 1
+            ;;
+    esac
+}
+
 # ============================================================================
 # MENU D'AIDE
 # ============================================================================
@@ -2425,6 +2579,8 @@ show_help() {
     echo "    stop <env>                Arrêter les services"
     echo "    restart <env>             Redémarrer les services"
     echo "    superset-import <env>     Importer les assets Superset (dashboards, charts, etc.)"
+    echo "    monitoring-agent <env> [action] [options]"
+    echo "                              Gerer l'agent monitoring du projet"
     echo ""
     echo -e "${CYAN}ENVIRONNEMENTS:${NC}"
     echo "    dev                       Environnement de développement"
@@ -2452,6 +2608,11 @@ show_help() {
     echo "    $0 status dev"
     echo "    $0 stop dev"
     echo "    $0 restart prod"
+    echo ""
+    echo -e "    ${WHITE}Monitoring agent (project-side):${NC}"
+    echo "    $0 monitoring-agent prod up airflow,postgres,redis"
+    echo "    $0 monitoring-agent prod status"
+    echo "    $0 monitoring-agent prod logs promtail"
     echo ""
     echo -e "${CYAN}CONFIGURATION:${NC}"
     echo -e "    Le fichier ${WHITE}.env.registry${NC} doit exister dans deployment/"
@@ -2542,6 +2703,14 @@ case "$COMMAND" in
             exit 1
         fi
         cmd_restart "$@"
+        ;;
+
+    monitoring-agent)
+        if [ $# -lt 1 ]; then
+            log_error "Usage: $0 monitoring-agent <env> [up|down|restart|status|logs] [profiles_csv|service]"
+            exit 1
+        fi
+        cmd_monitoring_agent "$@"
         ;;
 
     superset-import)

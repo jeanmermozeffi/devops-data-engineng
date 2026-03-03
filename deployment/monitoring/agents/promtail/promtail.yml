@@ -1,0 +1,93 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: ${LOKI_PUSH_URL}
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+
+    relabel_configs:
+      - source_labels: [__meta_docker_container_log_path]
+        target_label: __path__
+
+      - source_labels: [__meta_docker_container_name]
+        target_label: container
+        regex: '/(.*)'
+        replacement: '$1'
+
+      - source_labels: [__meta_docker_container_id]
+        target_label: container_id
+
+      - source_labels: [__meta_docker_container_label_cic_project]
+        target_label: cic_project
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        target_label: compose_project
+
+      - source_labels: [__meta_docker_container_label_cic_env]
+        target_label: cic_env
+      - source_labels: [__meta_docker_container_label_com_monitoring_env]
+        target_label: monitoring_env
+
+      - source_labels: [__meta_docker_container_label_cic_service]
+        target_label: cic_service
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: compose_service
+
+      - source_labels: [__meta_docker_container_label_cic_project]
+        target_label: project
+      - source_labels: [project, __meta_docker_container_label_com_docker_compose_project]
+        separator: ";"
+        regex: '^;(.*)$'
+        replacement: '$1'
+        target_label: project
+      - source_labels: [project]
+        regex: '^$'
+        replacement: '${AGENT_PROJECT_DEFAULT}'
+        target_label: project
+
+      - source_labels: [__meta_docker_container_label_cic_env]
+        target_label: env
+      - source_labels: [env, __meta_docker_container_label_com_monitoring_env]
+        separator: ";"
+        regex: '^;(.*)$'
+        replacement: '$1'
+        target_label: env
+      - source_labels: [env]
+        regex: '^$'
+        replacement: '${AGENT_ENV}'
+        target_label: env
+
+      - source_labels: [__meta_docker_container_label_cic_service]
+        target_label: service
+      - source_labels: [service, __meta_docker_container_label_com_docker_compose_service]
+        separator: ";"
+        regex: '^;(.*)$'
+        replacement: '$1'
+        target_label: service
+      - source_labels: [service, container]
+        separator: ";"
+        regex: '^;(.*)$'
+        replacement: '$1'
+        target_label: service
+
+      - target_label: host
+        replacement: '${AGENT_HOST}'
+      - target_label: region
+        replacement: '${AGENT_REGION}'
+      - target_label: job
+        replacement: docker
+
+    pipeline_stages:
+      - docker: {}
+      - regex:
+          expression: '(?i)(level|severity)=(?P<level>[a-z]+)'
+      - labels:
+          level:
