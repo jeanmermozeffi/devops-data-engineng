@@ -751,35 +751,6 @@ read_env_value_from_file() {
     printf '%s\n' "$value"
 }
 
-# En local, réinitialiser les données PostgreSQL bind-mount d'Airflow.
-# Utile quand l'utilisateur demande explicitement un nettoyage avant redeploy.
-cleanup_local_airflow_bind_data() {
-    local env_file="$1"
-    local postgres_data_path=""
-
-    if is_server_environment; then
-        return 0
-    fi
-
-    [ -f "$env_file" ] || return 0
-
-    postgres_data_path=$(read_env_value_from_file "$env_file" "AIRFLOW_POSTGRES_DATA_PATH" || true)
-    [ -n "$postgres_data_path" ] || return 0
-
-    # Sécurité: ne supprimer que dans le répertoire projet.
-    if [[ "$postgres_data_path" != "$PROJECT_ROOT" && "$postgres_data_path" != "$PROJECT_ROOT/"* ]]; then
-        log_warn "Nettoyage PostgreSQL ignoré (hors projet): $postgres_data_path"
-        return 0
-    fi
-
-    if [ -d "$postgres_data_path" ]; then
-        log_warn "Réinitialisation des données PostgreSQL locales: $postgres_data_path"
-        rm -rf "$postgres_data_path" 2>/dev/null || true
-        mkdir -p "$postgres_data_path" 2>/dev/null || true
-        log_success "Données PostgreSQL locales réinitialisées"
-    fi
-}
-
 # Construire le repository registry en évitant les doublons namespace/image.
 # Supporte:
 # - IMAGE_NAME="cicbi-kafka-platform" + REGISTRY_USERNAME="effijeanmermoz" -> effijeanmermoz/cicbi-kafka-platform
@@ -2314,6 +2285,35 @@ cmd_deploy() {
         unset COMPOSE_ENV_FILE_OVERRIDE
     fi
 
+    # En mode registry orchestrator, si les variables runtime Airflow ne sont pas
+    # définies dans .env.<env>, appliquer des defaults centralisés/surchargeables.
+    local effective_compose_env_file_pre="${COMPOSE_ENV_FILE_OVERRIDE:-$target_env_file}"
+    if [ "${STACK_TYPE}" = "orchestrator" ]; then
+        local dags_folder_from_env=""
+        local plugins_folder_from_env=""
+        local dags_default_from_env=""
+        local plugins_default_from_env=""
+        local default_airflow_dags_folder=""
+        local default_airflow_plugins_folder=""
+
+        dags_folder_from_env=$(read_env_value_from_file "$effective_compose_env_file_pre" "AIRFLOW__CORE__DAGS_FOLDER" || true)
+        plugins_folder_from_env=$(read_env_value_from_file "$effective_compose_env_file_pre" "AIRFLOW__CORE__PLUGINS_FOLDER" || true)
+        dags_default_from_env=$(read_env_value_from_file "$effective_compose_env_file_pre" "AIRFLOW_DAGS_FOLDER_DEFAULT" || true)
+        plugins_default_from_env=$(read_env_value_from_file "$effective_compose_env_file_pre" "AIRFLOW_PLUGINS_FOLDER_DEFAULT" || true)
+
+        default_airflow_dags_folder="${dags_default_from_env:-${AIRFLOW_DAGS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/dags}}"
+        default_airflow_plugins_folder="${plugins_default_from_env:-${AIRFLOW_PLUGINS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/plugins}}"
+
+        if [ -z "$dags_folder_from_env" ]; then
+            export AIRFLOW__CORE__DAGS_FOLDER="$default_airflow_dags_folder"
+            log_warn "AIRFLOW__CORE__DAGS_FOLDER non défini: fallback -> $default_airflow_dags_folder"
+        fi
+
+        if [ -z "$plugins_folder_from_env" ]; then
+            export AIRFLOW__CORE__PLUGINS_FOLDER="$default_airflow_plugins_folder"
+        fi
+    fi
+
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
 
@@ -2362,11 +2362,8 @@ cmd_deploy() {
                 ;;
         esac
 
-        # Pour Airflow en local: purge du bind-mount PostgreSQL afin d'éviter
-        # les erreurs de migration Alembic lors des changements de version d'image.
-        if [ "${STACK_TYPE}" = "orchestrator" ]; then
-            cleanup_local_airflow_bind_data "$effective_compose_env_file"
-        fi
+        # Aucun nettoyage ciblé PostgreSQL ici: la stack orchestrator utilise
+        # désormais un named volume (postgres-data), persistant comme Redis.
     else
         log_info "Nettoyage local ignoré"
     fi

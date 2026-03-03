@@ -100,7 +100,7 @@ get_dotenv_value() {
 }
 
 # Résoudre la version/image Airflow pour le build orchestrator.
-# Priorité: .env.<env> > variables shell/.devops.yml > fallback 3.0.1
+# Priorité: .env.<env> > variables shell/.devops.yml > defaults config-loader
 resolve_orchestrator_airflow_build_config() {
     local env="$1"
     local env_file="$PROJECT_ROOT/.env.$env"
@@ -121,7 +121,7 @@ resolve_orchestrator_airflow_build_config() {
     fi
 
     if [ -z "$airflow_version" ]; then
-        airflow_version="3.0.1"
+        airflow_version="${AIRFLOW_VERSION:-3.0.4}"
     fi
     if [ -z "$airflow_base_image" ]; then
         airflow_base_image="apache/airflow:${airflow_version}-python3.11"
@@ -1056,7 +1056,15 @@ cmd_build() {
 
     log_header "BUILD IMAGE - Environnement: $env"
 
-    local git_branch=${git_branch_override:-$(get_git_branch "$env")}
+    local git_branch=""
+    if [ -n "$git_branch_override" ]; then
+        git_branch="$git_branch_override"
+    elif [ "$use_git" != "true" ] || is_orchestrator_stack; then
+        git_branch=$(get_current_git_branch)
+        [ -n "$git_branch" ] || git_branch=$(get_git_branch "$env")
+    else
+        git_branch=$(get_git_branch "$env")
+    fi
     local full_image_name=$(get_full_image_name "$env" "$version_tag")
     local full_image_latest=$(get_full_image_name "$env" "latest")
 
@@ -1142,8 +1150,8 @@ cmd_build() {
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
     local app_python_path="${APP_PYTHON_PATH:-}"
-    local airflow_version="${AIRFLOW_VERSION:-3.0.1}"
-    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-apache/airflow:${airflow_version}-python3.11}"
+    local airflow_version="${AIRFLOW_VERSION:-}"
+    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-}"
     local build_args=(
         "--file" "$dockerfile"
         "--build-arg" "GIT_BRANCH=$git_branch"
@@ -1320,8 +1328,16 @@ cmd_build_push_multiarch() {
         build_mode="clone"
     fi
 
-    # Obtenir la branche Git selon l'environnement (ou override explicite)
-    local git_branch=${git_branch_override:-$(get_git_branch "$env")}
+    # Obtenir la branche Git selon le mode build (ou override explicite)
+    local git_branch=""
+    if [ -n "$git_branch_override" ]; then
+        git_branch="$git_branch_override"
+    elif [ "$use_git" != "true" ] || is_orchestrator_stack; then
+        git_branch=$(get_current_git_branch)
+        [ -n "$git_branch" ] || git_branch=$(get_git_branch "$env")
+    else
+        git_branch=$(get_git_branch "$env")
+    fi
 
     # Déterminer le Dockerfile selon mode build et environnement
     local dockerfile
@@ -1396,8 +1412,8 @@ cmd_build_push_multiarch() {
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
     local app_python_path="${APP_PYTHON_PATH:-}"
-    local airflow_version="${AIRFLOW_VERSION:-3.0.1}"
-    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-apache/airflow:${airflow_version}-python3.11}"
+    local airflow_version="${AIRFLOW_VERSION:-}"
+    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-}"
     local build_platforms="${RELEASE_PLATFORMS:-linux/amd64,linux/arm64}"
     local build_args=(
         "--file" "$dockerfile"
@@ -1856,6 +1872,10 @@ interactive_mode() {
                 if [ "$use_git" == "true" ]; then
                     echo ""
                     git_branch_override=$(choose_git_branch "$env") || continue
+                else
+                    git_branch_override=$(get_current_git_branch)
+                    [ -n "$git_branch_override" ] || git_branch_override=$(get_git_branch "$env")
+                    log_info "Build local: branche détectée -> $git_branch_override"
                 fi
 
                 cmd_build "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
@@ -1909,6 +1929,10 @@ interactive_mode() {
                 if [ "$use_git" == "true" ]; then
                     echo ""
                     git_branch_override=$(choose_git_branch "$env") || continue
+                else
+                    git_branch_override=$(get_current_git_branch)
+                    [ -n "$git_branch_override" ] || git_branch_override=$(get_git_branch "$env")
+                    log_info "Build local: branche détectée -> $git_branch_override"
                 fi
 
                 cmd_release "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
@@ -2020,6 +2044,10 @@ interactive_mode() {
                 if [ "$use_git" == "true" ]; then
                     echo ""
                     git_branch_override=$(choose_git_branch "$env") || continue
+                else
+                    git_branch_override=$(get_current_git_branch)
+                    [ -n "$git_branch_override" ] || git_branch_override=$(get_git_branch "$env")
+                    log_info "Build local: branche détectée -> $git_branch_override"
                 fi
 
                 cmd_build_push_multiarch "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"

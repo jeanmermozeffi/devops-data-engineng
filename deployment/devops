@@ -382,6 +382,13 @@ project_name: $project_name
 # Type de stack (ex: fastapi-redis, fastapi-postgres-redis, orchestrator, monitoring)
 stack_type: fastapi-redis
 
+# Orchestrator / Airflow (optionnel)
+# Utilisé si stack_type: orchestrator
+airflow_version: 3.0.4
+airflow_base_image: apache/airflow:3.0.4-python3.11
+airflow_dags_folder_default: /opt/airflow/src/airflow_src/dags
+airflow_plugins_folder_default: /opt/airflow/src/airflow_src/plugins
+
 # Nom du projet Docker Compose (si différent du nom du projet)
 compose_project_name: $project_name
 
@@ -500,6 +507,12 @@ project_name: $project_name
 stack_type: fastapi-redis
 compose_project_name: $project_name
 label_namespace: cic
+
+# Orchestrator / Airflow (optionnel)
+airflow_version: 3.0.4
+airflow_base_image: apache/airflow:3.0.4-python3.11
+airflow_dags_folder_default: /opt/airflow/src/airflow_src/dags
+airflow_plugins_folder_default: /opt/airflow/src/airflow_src/plugins
 
 registry_username: your-dockerhub-username
 registry_url: docker.io

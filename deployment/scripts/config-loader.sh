@@ -347,6 +347,19 @@ load_devops_config() {
     nested_value=$(get_nested_yaml_value "server" "deploy_path" "$config_file")
     [ -n "$nested_value" ] && { SERVER_DEPLOY_PATH="$nested_value"; export SERVER_DEPLOY_PATH; }
 
+    # Orchestrator / Airflow (optionnel)
+    nested_value=$(get_nested_yaml_value "orchestrator" "airflow_version" "$config_file")
+    [ -n "$nested_value" ] && { AIRFLOW_VERSION="$nested_value"; export AIRFLOW_VERSION; }
+
+    nested_value=$(get_nested_yaml_value "orchestrator" "airflow_base_image" "$config_file")
+    [ -n "$nested_value" ] && { AIRFLOW_BASE_IMAGE="$nested_value"; export AIRFLOW_BASE_IMAGE; }
+
+    nested_value=$(get_nested_yaml_value "orchestrator" "airflow_dags_folder_default" "$config_file")
+    [ -n "$nested_value" ] && { AIRFLOW_DAGS_FOLDER_DEFAULT="$nested_value"; export AIRFLOW_DAGS_FOLDER_DEFAULT; }
+
+    nested_value=$(get_nested_yaml_value "orchestrator" "airflow_plugins_folder_default" "$config_file")
+    [ -n "$nested_value" ] && { AIRFLOW_PLUGINS_FOLDER_DEFAULT="$nested_value"; export AIRFLOW_PLUGINS_FOLDER_DEFAULT; }
+
     # Normaliser une URL de repo Git en format clonable HTTPS
     normalize_git_repo_url() {
         local repo="$1"
@@ -422,6 +435,12 @@ load_devops_config() {
     export APP_ENTRYPOINT="${APP_ENTRYPOINT:-app.main:app}"
     export APP_PYTHON_PATH="${APP_PYTHON_PATH:-}"
     export WORKDIR="${WORKDIR:-/app}"
+
+    # Orchestrator / Airflow (defaults centralisés et surchargeables via .devops.yml/.env/shell)
+    export AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.0.4}"
+    export AIRFLOW_BASE_IMAGE="${AIRFLOW_BASE_IMAGE:-apache/airflow:${AIRFLOW_VERSION}-python3.11}"
+    export AIRFLOW_DAGS_FOLDER_DEFAULT="${AIRFLOW_DAGS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/dags}"
+    export AIRFLOW_PLUGINS_FOLDER_DEFAULT="${AIRFLOW_PLUGINS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/plugins}"
 
     # SSH
     export SSH_USER="${SSH_USER:-root}"
