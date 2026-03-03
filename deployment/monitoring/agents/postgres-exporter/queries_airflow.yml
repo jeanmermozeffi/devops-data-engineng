@@ -1,0 +1,66 @@
+scheduler_parsing_time:
+  query: |
+    SELECT
+      COALESCE(AVG(EXTRACT(EPOCH FROM (NOW() - last_parsed_time))), 0) AS avg_parsing_time_seconds
+    FROM dag
+    WHERE last_parsed_time IS NOT NULL
+  metrics:
+    - avg_parsing_time_seconds:
+        usage: "GAUGE"
+        name: "airflow_avg_parsing_time_seconds"
+
+tasks_scheduled_last_minute:
+  query: |
+    SELECT
+      COUNT(*) AS tasks_scheduled_last_minute
+    FROM task_instance
+    WHERE queued_dttm > NOW() - INTERVAL '1 minute'
+  metrics:
+    - tasks_scheduled_last_minute:
+        usage: "GAUGE"
+        name: "airflow_tasks_scheduled_last_minute"
+
+dag_inventory:
+  query: |
+    SELECT
+      COUNT(*) AS dag_count,
+      COUNT(*) FILTER (WHERE is_paused = false) AS active_dags,
+      COUNT(*) FILTER (WHERE is_paused = true) AS paused_dags
+    FROM dag
+  metrics:
+    - dag_count:
+        usage: "GAUGE"
+        name: "airflow_dag_count"
+    - active_dags:
+        usage: "GAUGE"
+        name: "airflow_active_dags"
+    - paused_dags:
+        usage: "GAUGE"
+        name: "airflow_paused_dags"
+
+task_count_by_state:
+  query: |
+    SELECT
+      state,
+      COUNT(*) AS task_count
+    FROM task_instance
+    WHERE state IS NOT NULL
+    GROUP BY state
+  metrics:
+    - state:
+        usage: "LABEL"
+    - task_count:
+        usage: "GAUGE"
+        name: "airflow_task_count"
+
+failed_dag_runs_24h:
+  query: |
+    SELECT
+      COUNT(*) AS failed_dag_runs_24h
+    FROM dag_run
+    WHERE state = 'failed'
+      AND start_date > NOW() - INTERVAL '24 hours'
+  metrics:
+    - failed_dag_runs_24h:
+        usage: "GAUGE"
+        name: "airflow_failed_dag_runs_24h"

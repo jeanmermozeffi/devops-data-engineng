@@ -1,0 +1,4 @@
+labels:
+  - "cic.project=${PROJECT_NAME}"
+  - "cic.env=${ENV}"
+  - "cic.service=api"

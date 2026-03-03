@@ -110,12 +110,16 @@ load_env() {
 
     # Chercher le fichier .env dans deployment/ ou à la racine
     local env_file
-    if [ -f "deployment/.env.$env" ]; then
-        env_file="deployment/.env.$env"
+    if [ -f ".env.$env.local" ]; then
+        env_file=".env.$env.local"
     elif [ -f ".env.$env" ]; then
         env_file=".env.$env"
+    elif [ -f "deployment/.env.$env.local" ]; then
+        env_file="deployment/.env.$env.local"
+    elif [ -f "deployment/.env.$env" ]; then
+        env_file="deployment/.env.$env"
     else
-        log_error "Fichier .env.$env introuvable (cherché dans deployment/ et racine)"
+        log_error "Fichier .env.$env(.local) introuvable (cherché dans racine puis deployment/)"
         exit 1
     fi
 
@@ -138,6 +142,13 @@ load_env() {
     # Normaliser les variables Docker les plus utilisées par docker-compose.
     # Fallback: utiliser la config projet (.devops.yml) quand .env.<env> est incomplet.
     export ENV="${ENV:-$env}"
+    if [ -z "${AIRFLOW_ENV_FILE:-}" ]; then
+        if [[ "$env_file" == deployment/* ]]; then
+            export AIRFLOW_ENV_FILE="${env_file#deployment/}"
+        else
+            export AIRFLOW_ENV_FILE="../$env_file"
+        fi
+    fi
     export DOCKER_REGISTRY="${DOCKER_REGISTRY:-${REGISTRY_URL:-docker.io}}"
     export DOCKER_USERNAME="${DOCKER_USERNAME:-${REGISTRY_USERNAME:-}}"
     export IMAGE_NAME="${IMAGE_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
@@ -711,6 +722,24 @@ cmd_deploy() {
     validate_env "$env"
     load_env "$env"
 
+    # Déterminer la branche cible si elle n'est pas explicitement fournie
+    if [ -z "${GIT_BRANCH:-}" ]; then
+        case "$env" in
+            dev)
+                GIT_BRANCH="${BRANCH:-${DEV_BRANCH:-dev}}"
+                ;;
+            staging)
+                GIT_BRANCH="${BRANCH:-${STAGING_BRANCH:-staging}}"
+                ;;
+            prod)
+                GIT_BRANCH="${BRANCH:-${PROD_BRANCH:-main}}"
+                ;;
+            *)
+                GIT_BRANCH="${BRANCH:-${DEV_BRANCH:-dev}}"
+                ;;
+        esac
+    fi
+
     # Override GIT_BRANCH si une branche custom est spécifiée
     if [ -n "$custom_branch" ]; then
         log_info "Utilisation de la branche personnalisée: $custom_branch"
@@ -1132,19 +1161,31 @@ cmd_health() {
             ;;
         *)
             local port=$(get_port_for_env "$env" "api")
+            local healthcheck_url="${AIRFLOW_API_HEALTHCHECK_URL:-http://localhost:$port/health}"
+            local api_health_max_attempts="${API_HEALTH_MAX_ATTEMPTS:-20}"
+            local api_health_sleep_seconds="${API_HEALTH_SLEEP_SECONDS:-3}"
 
-            log_info "Health check de l'API (port $port)..."
-            for i in {1..10}; do
-                if curl -sf "http://localhost:$port/health" > /dev/null; then
-                    log_success "API operationnelle sur le port $port"
+            if [[ "$healthcheck_url" != http://* && "$healthcheck_url" != https://* ]]; then
+                healthcheck_url="http://localhost:$port$healthcheck_url"
+            fi
+
+            if [[ "$healthcheck_url" =~ ^https?://(localhost|127\.0\.0\.1|api):8080(/.*)?$ ]]; then
+                local health_path="${BASH_REMATCH[2]:-/health}"
+                healthcheck_url="http://localhost:$port$health_path"
+            fi
+
+            log_info "Health check de l'API: $healthcheck_url"
+            for i in $(seq 1 "$api_health_max_attempts"); do
+                if curl -sf "$healthcheck_url" > /dev/null; then
+                    log_success "API operationnelle: $healthcheck_url"
                     return 0
                 else
-                    if [ $i -eq 10 ]; then
-                        log_error "L'API ne repond pas apres 10 tentatives"
+                    if [ "$i" -eq "$api_health_max_attempts" ]; then
+                        log_error "L'API ne repond pas apres $api_health_max_attempts tentatives"
                         return 1
                     fi
-                    log_warn "Tentative $i/10... (attente 3s)"
-                    sleep 3
+                    log_warn "Tentative $i/$api_health_max_attempts... (attente ${api_health_sleep_seconds}s)"
+                    sleep "$api_health_sleep_seconds"
                 fi
             done
             ;;

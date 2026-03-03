@@ -8,6 +8,9 @@
 # Nom du projet (utilisé pour les conteneurs, réseaux, volumes)
 project_name: my-project
 
+# Type de stack (ex: fastapi-redis, fastapi-postgres-redis, orchestrator, monitoring)
+stack_type: fastapi-redis
+
 # Nom du projet Docker Compose (si différent du nom du projet)
 compose_project_name: my-project
 
