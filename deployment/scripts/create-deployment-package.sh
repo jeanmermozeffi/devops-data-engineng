@@ -831,6 +831,7 @@ EOFPROFILE
         "env-encrypt.py"
         "sensitive-vars.yml"
         "auto-encrypt-envs.sh"
+        "docker-manage.sh"
     )
 
     for script in "${SCRIPTS_TO_COPY[@]}"; do
@@ -844,6 +845,16 @@ EOFPROFILE
             log_warn "⚠️  $script non trouvé"
         fi
     done
+
+    # Copier les scripts utilitaires du projet (racine scripts/), si présents
+    PROJECT_SCRIPTS_DIR="$PROJECT_DIR/scripts"
+    if [ -d "$PROJECT_SCRIPTS_DIR" ]; then
+        mkdir -p "$PACKAGE_DIR/scripts/project-scripts"
+        cp -r "$PROJECT_SCRIPTS_DIR"/. "$PACKAGE_DIR/scripts/project-scripts/"
+        log_success "✓ scripts/ du projet copié vers scripts/project-scripts/"
+    else
+        log_info "Aucun dossier scripts/ à la racine du projet"
+    fi
 
     # Copier le fichier requirements pour l'environnement virtuel
     if [ -f "$PROJECT_DIR/$DEPLOYMENT_SUBDIR/requirements-encryption.txt" ]; then
