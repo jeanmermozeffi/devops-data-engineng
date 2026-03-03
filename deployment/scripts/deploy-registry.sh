@@ -631,16 +631,22 @@ get_env_file() {
             fi
         fi
     else
-        # En local, utiliser directement le fichier .env
-        env_file_path="$PROJECT_ROOT/.env.$env"
+        # En local, privilégier .env.<env>.local si disponible.
+        local env_file_local="$PROJECT_ROOT/.env.$env.local"
+        local env_file_standard="$PROJECT_ROOT/.env.$env"
 
-        if [ ! -f "$env_file_path" ]; then
-            log_error "Fichier .env.$env non trouvé à la racine du projet!" >&2
-            log_info "Chemin attendu: $env_file_path" >&2
+        if [ -f "$env_file_local" ]; then
+            env_file_path="$env_file_local"
+            log_info "Environnement local détecté - utilisation de .env.$env.local" >&2
+        elif [ -f "$env_file_standard" ]; then
+            env_file_path="$env_file_standard"
+            log_info "Environnement local détecté - utilisation de .env.$env" >&2
+        else
+            log_error "Fichier .env.$env introuvable à la racine du projet!" >&2
+            log_info "Chemins testés: $env_file_local, $env_file_standard" >&2
             return 1
         fi
 
-        log_info "Environnement local détecté - utilisation de .env.$env" >&2
         echo "$env_file_path"
         return 0
     fi
@@ -661,6 +667,41 @@ get_compose_env_file_path() {
     fi
 }
 
+# Préparer un fichier --env-file temporaire pour usage local Docker Desktop.
+# Convertit uniquement les variables *_PATH qui pointent vers /srv/home/<instance>/...
+# vers le PROJECT_ROOT local afin d'éviter les erreurs de bind mount sur macOS.
+prepare_local_compose_env_override() {
+    local source_env_file="$1"
+    local output_env_file="$2"
+
+    # Ne jamais réécrire en environnement serveur
+    if is_server_environment; then
+        return 1
+    fi
+
+    [ -f "$source_env_file" ] || return 1
+
+    # Détecter au moins une variable *_PATH qui cible /srv/home/...
+    if ! grep -Eq '^[A-Za-z_][A-Za-z0-9_]*_PATH=["'"'"']?/srv/home/' "$source_env_file"; then
+        return 1
+    fi
+
+    local escaped_root
+    escaped_root=$(printf '%s\n' "$PROJECT_ROOT" | sed 's/[\/&]/\\&/g')
+
+    # Réécriture du préfixe seulement: /srv/home/<instance>/ -> <PROJECT_ROOT>/
+    sed -E "s#^([A-Za-z_][A-Za-z0-9_]*_PATH=)([\"']?)/srv/home/[^/]+/?#\\1\\2${escaped_root}/#" \
+        "$source_env_file" > "$output_env_file"
+
+    # Vérifier que la transformation a bien supprimé les chemins /srv/home des variables *_PATH
+    if grep -Eq '^[A-Za-z_][A-Za-z0-9_]*_PATH=["'"'"']?/srv/home/' "$output_env_file"; then
+        rm -f "$output_env_file"
+        return 1
+    fi
+
+    return 0
+}
+
 # Nettoyer les fichiers temporaires
 cleanup_temp_env() {
     local env_file=$1
@@ -668,6 +709,56 @@ cleanup_temp_env() {
     # Supprimer uniquement si c'est un fichier temporaire
     if [[ "$env_file" == /tmp/.env.* ]]; then
         rm -f "$env_file"
+    fi
+}
+
+# Lire une variable depuis un fichier .env (dernière occurrence).
+read_env_value_from_file() {
+    local env_file="$1"
+    local key="$2"
+    local value=""
+
+    [ -f "$env_file" ] || return 1
+
+    value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+    [ -n "$value" ] || return 1
+
+    # Trim simple et suppression des quotes éventuelles.
+    value=$(echo "$value" | sed 's/[[:space:]]*$//')
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+
+    printf '%s\n' "$value"
+}
+
+# En local, réinitialiser les données PostgreSQL bind-mount d'Airflow.
+# Utile quand l'utilisateur demande explicitement un nettoyage avant redeploy.
+cleanup_local_airflow_bind_data() {
+    local env_file="$1"
+    local postgres_data_path=""
+
+    if is_server_environment; then
+        return 0
+    fi
+
+    [ -f "$env_file" ] || return 0
+
+    postgres_data_path=$(read_env_value_from_file "$env_file" "AIRFLOW_POSTGRES_DATA_PATH" || true)
+    [ -n "$postgres_data_path" ] || return 0
+
+    # Sécurité: ne supprimer que dans le répertoire projet.
+    if [[ "$postgres_data_path" != "$PROJECT_ROOT" && "$postgres_data_path" != "$PROJECT_ROOT/"* ]]; then
+        log_warn "Nettoyage PostgreSQL ignoré (hors projet): $postgres_data_path"
+        return 0
+    fi
+
+    if [ -d "$postgres_data_path" ]; then
+        log_warn "Réinitialisation des données PostgreSQL locales: $postgres_data_path"
+        rm -rf "$postgres_data_path" 2>/dev/null || true
+        mkdir -p "$postgres_data_path" 2>/dev/null || true
+        log_success "Données PostgreSQL locales réinitialisées"
     fi
 }
 
@@ -840,6 +931,14 @@ get_compose_files() {
     # --env-file est nécessaire pour la substitution de variables dans le YAML
     # (env_file dans docker-compose.yml charge les variables dans le container, pas pour le parsing YAML)
 
+    # Priorité au fichier d'override explicite (ex: adaptation locale des *_PATH)
+    local env_file_opt=""
+    if [ -n "${COMPOSE_ENV_FILE_OVERRIDE:-}" ] && [ -f "${COMPOSE_ENV_FILE_OVERRIDE}" ]; then
+        env_file_opt="--env-file ${COMPOSE_ENV_FILE_OVERRIDE}"
+        echo "${env_file_opt} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
+        return 0
+    fi
+
     # Déterminer le chemin absolu et relatif du fichier .env selon le mode de déploiement:
     # - Mode développement (structure complète): ../.env.${env} (depuis deployment/)
     # - Mode package minimal (fichiers à la racine): ./.env.${env}
@@ -855,7 +954,6 @@ get_compose_files() {
     fi
 
     # N'inclure --env-file que si le fichier existe (évite l'échec quand .env est chiffré sur le serveur)
-    local env_file_opt=""
     if [ -f "$env_file_abs" ]; then
         env_file_opt="--env-file ${env_file_path}"
     fi
@@ -2030,6 +2128,7 @@ cmd_deploy() {
     local env=$1
     local tag=${2:-${env}-latest}
     local env_file=""
+    local compose_env_override_file=""
     local cleanup_needed=false
 
     # Fonction de nettoyage en cas d'erreur
@@ -2045,7 +2144,12 @@ cmd_deploy() {
                 rm -f "$PROJECT_ROOT/.env.$env"
                 log_info "Fichier .env.$env temporaire supprimé de la racine du projet"
             fi
+            if [ -n "$compose_env_override_file" ] && [ -f "$compose_env_override_file" ]; then
+                rm -f "$compose_env_override_file"
+                log_info "Fichier --env-file temporaire supprimé: $compose_env_override_file"
+            fi
         fi
+        unset COMPOSE_ENV_FILE_OVERRIDE
     }
 
     # Configurer le trap pour nettoyer en cas d'erreur ou d'interruption
@@ -2161,6 +2265,19 @@ cmd_deploy() {
     # Exporter un chemin absolu pour les scripts externes (ex: superset_manager.py)
     export SUPERSET_ENV_FILE="$target_env_file"
 
+    # En local, adapter temporairement les chemins /srv/home/... pour la substitution YAML docker compose
+    # sans modifier définitivement le .env du projet.
+    compose_env_override_file="/tmp/.env.${env}.compose.$$"
+    if prepare_local_compose_env_override "$target_env_file" "$compose_env_override_file"; then
+        export COMPOSE_ENV_FILE_OVERRIDE="$compose_env_override_file"
+        cleanup_needed=true
+        log_warn "Chemins serveur /srv/home détectés dans .env.$env"
+        log_info "Adaptation locale automatique appliquée via --env-file temporaire"
+    else
+        compose_env_override_file=""
+        unset COMPOSE_ENV_FILE_OVERRIDE
+    fi
+
     # Note: Les variables du fichier .env sont chargées par docker compose via --env-file
     # (pas besoin de sourcer le fichier dans le shell)
 
@@ -2173,6 +2290,9 @@ cmd_deploy() {
     else
         export COMPOSE_PROJECT_NAME="${base_compose_name}-${env}"
     fi
+
+    # Fichier .env effectif utilisé par docker compose (original ou override local temporaire).
+    local effective_compose_env_file="${COMPOSE_ENV_FILE_OVERRIDE:-$target_env_file}"
 
     # Auto-clean optionnel: arrêter un éventuel déploiement local pour éviter les conflits
     echo ""
@@ -2205,6 +2325,12 @@ cmd_deploy() {
                 docker volume rm "$volume_name" 2>/dev/null || true
                 ;;
         esac
+
+        # Pour Airflow en local: purge du bind-mount PostgreSQL afin d'éviter
+        # les erreurs de migration Alembic lors des changements de version d'image.
+        if [ "${STACK_TYPE}" = "orchestrator" ]; then
+            cleanup_local_airflow_bind_data "$effective_compose_env_file"
+        fi
     else
         log_info "Nettoyage local ignoré"
     fi

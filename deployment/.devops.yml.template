@@ -11,6 +11,10 @@ project_name: my-project
 # Type de stack (ex: fastapi-redis, fastapi-postgres-redis, orchestrator, monitoring)
 stack_type: fastapi-redis
 
+# Airflow (optionnel, utilisé pour stack_type: orchestrator)
+# airflow_version: 3.0.1
+# airflow_base_image: apache/airflow:3.0.1-python3.11
+
 # Nom du projet Docker Compose (si différent du nom du projet)
 compose_project_name: my-project
 
