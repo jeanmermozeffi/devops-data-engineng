@@ -85,6 +85,51 @@ resolve_git_repo_for_build() {
     normalize_git_repo_for_build "$repo"
 }
 
+# Lire une clé KEY=VALUE depuis un fichier .env (sans exécuter le fichier).
+get_dotenv_value() {
+    local env_file="$1"
+    local key="$2"
+    [ -f "$env_file" ] || return 1
+
+    local value
+    value=$(grep -E "^${key}=" "$env_file" 2>/dev/null | tail -1 | cut -d'=' -f2-)
+    value=$(echo "$value" | sed -e 's/[[:space:]]#.*$//' -e 's/\r$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+    [ -n "$value" ] || return 1
+    echo "$value"
+    return 0
+}
+
+# Résoudre la version/image Airflow pour le build orchestrator.
+# Priorité: .env.<env> > variables shell/.devops.yml > fallback 3.0.1
+resolve_orchestrator_airflow_build_config() {
+    local env="$1"
+    local env_file="$PROJECT_ROOT/.env.$env"
+    local from_env_file_version=""
+    local from_env_file_base=""
+
+    from_env_file_version=$(get_dotenv_value "$env_file" "AIRFLOW_VERSION" || true)
+    from_env_file_base=$(get_dotenv_value "$env_file" "AIRFLOW_BASE_IMAGE" || true)
+
+    local airflow_version="${AIRFLOW_VERSION:-}"
+    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-}"
+
+    if [ -n "$from_env_file_version" ]; then
+        airflow_version="$from_env_file_version"
+    fi
+    if [ -n "$from_env_file_base" ]; then
+        airflow_base_image="$from_env_file_base"
+    fi
+
+    if [ -z "$airflow_version" ]; then
+        airflow_version="3.0.1"
+    fi
+    if [ -z "$airflow_base_image" ]; then
+        airflow_base_image="apache/airflow:${airflow_version}-python3.11"
+    fi
+
+    echo "${airflow_version}|${airflow_base_image}|${env_file}"
+}
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -931,6 +976,33 @@ get_full_image_name() {
     esac
 }
 
+# Déterminer si la stack est un orchestrateur (Airflow, etc.)
+is_orchestrator_stack() {
+    [ "${STACK_TYPE:-}" = "orchestrator" ]
+}
+
+# Retourne 0 si le Dockerfile a besoin du contexte racine du repo
+# (COPY/ADD locaux sans --from), sinon 1.
+dockerfile_requires_repo_context() {
+    local dockerfile="$1"
+    [ -f "$dockerfile" ] || return 0
+
+    if awk '
+        BEGIN { need=0 }
+        /^[[:space:]]*(COPY|ADD)[[:space:]]/ {
+            line=$0
+            if (line !~ /--from=/) {
+                need=1
+                exit 0
+            }
+        }
+        END { exit (need ? 0 : 1) }
+    ' "$dockerfile"; then
+        return 0
+    fi
+    return 1
+}
+
 # Vérifier si Docker est connecté au registry
 check_registry_login() {
     log_info "Vérification de la connexion au registry..."
@@ -980,6 +1052,7 @@ cmd_build() {
     local no_cache=${3:-false}
     local use_git=${4:-true}
     local git_branch_override=${5:-}
+    local effective_use_git="$use_git"
 
     log_header "BUILD IMAGE - Environnement: $env"
 
@@ -994,8 +1067,13 @@ cmd_build() {
     # Sélectionner le Dockerfile
     local dockerfile
     local dockerfile_dir="${DEPLOYMENT_DIR:-deployment}/docker"
+    local build_context="."
 
-    if [ "$use_git" == "true" ]; then
+    if is_orchestrator_stack && [ -f "$dockerfile_dir/Dockerfile.airflow-java" ]; then
+        dockerfile="$dockerfile_dir/Dockerfile.airflow-java"
+        effective_use_git=false
+        log_info "Stack orchestrator détectée: utilisation de Dockerfile.airflow-java (build local)"
+    elif [ "$use_git" == "true" ]; then
         # Essayer d'abord la variante .git, sinon utiliser le Dockerfile normal
         if [ -f "$dockerfile_dir/Dockerfile.${env}.git" ]; then
             dockerfile="$dockerfile_dir/Dockerfile.${env}.git"
@@ -1004,10 +1082,17 @@ cmd_build() {
             dockerfile="$dockerfile_dir/Dockerfile.${env}"
             log_warn "Dockerfile.${env}.git non trouvé, utilisation de Dockerfile.${env}"
             log_info "Mode: Copie locale"
+            effective_use_git=false
         fi
     else
         dockerfile="$dockerfile_dir/Dockerfile.${env}"
         log_info "Mode: Copie locale"
+        effective_use_git=false
+    fi
+
+    if is_orchestrator_stack && [ -n "$dockerfile" ] && ! dockerfile_requires_repo_context "$dockerfile"; then
+        build_context="$dockerfile_dir"
+        log_info "Contexte de build optimisé: $build_context (pas de COPY/ADD local)"
     fi
 
     if [ -z "$dockerfile" ] || [ ! -f "$dockerfile" ]; then
@@ -1040,7 +1125,7 @@ cmd_build() {
 
     # Arguments de build
     local git_repo_build=""
-    if [ "$use_git" == "true" ]; then
+    if [ "$effective_use_git" == "true" ]; then
         git_repo_build=$(resolve_git_repo_for_build)
         if [ -z "$git_repo_build" ]; then
             log_error "GIT_REPO non défini et remote.origin introuvable"
@@ -1057,6 +1142,8 @@ cmd_build() {
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
     local app_python_path="${APP_PYTHON_PATH:-}"
+    local airflow_version="${AIRFLOW_VERSION:-3.0.1}"
+    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-apache/airflow:${airflow_version}-python3.11}"
     local build_args=(
         "--file" "$dockerfile"
         "--build-arg" "GIT_BRANCH=$git_branch"
@@ -1070,13 +1157,28 @@ cmd_build() {
         "--build-arg" "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
         "--build-arg" "VCS_REF=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
     )
+    if is_orchestrator_stack; then
+        local airflow_config
+        local airflow_env_file
+        airflow_config=$(resolve_orchestrator_airflow_build_config "$env")
+        airflow_version=$(echo "$airflow_config" | cut -d'|' -f1)
+        airflow_base_image=$(echo "$airflow_config" | cut -d'|' -f2)
+        airflow_env_file=$(echo "$airflow_config" | cut -d'|' -f3)
+
+        build_args+=("--build-arg" "AIRFLOW_BASE_IMAGE=$airflow_base_image")
+        build_args+=("--build-arg" "AIRFLOW_VERSION=$airflow_version")
+        if [ -f "$airflow_env_file" ]; then
+            log_info "Airflow version source: $airflow_env_file"
+        fi
+        log_info "Airflow base image: $airflow_base_image"
+    fi
 
     # Ajouter le token GitHub/GitLab comme secret si disponible (sécurisé)
     local secret_args=()
     local secret_file=""
     local username_file=""
 
-    if [ -n "$GITHUB_TOKEN" ]; then
+    if [ -n "$GITHUB_TOKEN" ] && [ "$effective_use_git" == "true" ]; then
         # Créer un fichier temporaire pour le secret token
         # Nettoyer le token (enlever espaces, newlines, retours chariot)
         local CLEAN_TOKEN=$(echo "$GITHUB_TOKEN" | tr -d ' \n\r\t')
@@ -1123,7 +1225,7 @@ cmd_build() {
             "${build_args[@]}" \
             "${secret_args[@]}" \
             --load \
-            .
+            "$build_context"
     else
         # Build classique
         docker build \
@@ -1131,7 +1233,7 @@ cmd_build() {
             --tag "$full_image_latest" \
             "${build_args[@]}" \
             "${secret_args[@]}" \
-            .
+            "$build_context"
     fi
 
     # Nettoyer les fichiers de secrets temporaires
@@ -1199,6 +1301,7 @@ cmd_build_push_multiarch() {
     local no_cache=${3:-false}
     local use_git=${4:-true}
     local git_branch_override=${5:-}
+    local effective_use_git="$use_git"
 
     log_header "BUILD + PUSH MULTI-ARCH - Environnement: $env"
 
@@ -1223,17 +1326,29 @@ cmd_build_push_multiarch() {
     # Déterminer le Dockerfile selon mode build et environnement
     local dockerfile
     local dockerfile_dir="${DEPLOYMENT_DIR:-deployment}/docker"
+    local build_context="."
 
-    if [ "$use_git" == "true" ]; then
+    if is_orchestrator_stack && [ -f "$dockerfile_dir/Dockerfile.airflow-java" ]; then
+        dockerfile="$dockerfile_dir/Dockerfile.airflow-java"
+        effective_use_git=false
+        log_info "Stack orchestrator détectée: utilisation de Dockerfile.airflow-java (build local)"
+    elif [ "$use_git" == "true" ]; then
         # Essayer d'abord la variante .git, sinon utiliser le Dockerfile normal
         if [ -f "$dockerfile_dir/Dockerfile.${env}.git" ]; then
             dockerfile="$dockerfile_dir/Dockerfile.${env}.git"
         elif [ -f "$dockerfile_dir/Dockerfile.${env}" ]; then
             dockerfile="$dockerfile_dir/Dockerfile.${env}"
             log_warn "Dockerfile.${env}.git non trouvé, utilisation de Dockerfile.${env}"
+            effective_use_git=false
         fi
     else
         dockerfile="$dockerfile_dir/Dockerfile.${env}"
+        effective_use_git=false
+    fi
+
+    if is_orchestrator_stack && [ -n "$dockerfile" ] && ! dockerfile_requires_repo_context "$dockerfile"; then
+        build_context="$dockerfile_dir"
+        log_info "Contexte de build optimisé: $build_context (pas de COPY/ADD local)"
     fi
 
     # Vérifier que le Dockerfile existe
@@ -1264,7 +1379,7 @@ cmd_build_push_multiarch() {
 
     # Arguments de build
     local git_repo_build=""
-    if [ "$use_git" == "true" ]; then
+    if [ "$effective_use_git" == "true" ]; then
         git_repo_build=$(resolve_git_repo_for_build)
         if [ -z "$git_repo_build" ]; then
             log_error "GIT_REPO non défini et remote.origin introuvable"
@@ -1281,6 +1396,8 @@ cmd_build_push_multiarch() {
     local app_entrypoint="${APP_ENTRYPOINT:-app.main:app}"
     local workdir="${WORKDIR:-/app}"
     local app_python_path="${APP_PYTHON_PATH:-}"
+    local airflow_version="${AIRFLOW_VERSION:-3.0.1}"
+    local airflow_base_image="${AIRFLOW_BASE_IMAGE:-apache/airflow:${airflow_version}-python3.11}"
     local build_args=(
         "--file" "$dockerfile"
         "--platform" "linux/amd64,linux/arm64"
@@ -1298,6 +1415,21 @@ cmd_build_push_multiarch() {
         "--tag" "$full_image_latest"
         "--push"  # Push directement sans charger localement
     )
+    if is_orchestrator_stack; then
+        local airflow_config
+        local airflow_env_file
+        airflow_config=$(resolve_orchestrator_airflow_build_config "$env")
+        airflow_version=$(echo "$airflow_config" | cut -d'|' -f1)
+        airflow_base_image=$(echo "$airflow_config" | cut -d'|' -f2)
+        airflow_env_file=$(echo "$airflow_config" | cut -d'|' -f3)
+
+        build_args+=("--build-arg" "AIRFLOW_BASE_IMAGE=$airflow_base_image")
+        build_args+=("--build-arg" "AIRFLOW_VERSION=$airflow_version")
+        if [ -f "$airflow_env_file" ]; then
+            log_info "Airflow version source: $airflow_env_file"
+        fi
+        log_info "Airflow base image: $airflow_base_image"
+    fi
 
     # Attestations Buildx (provenance/SBOM) :
     # - configurable via .devops.yml (buildx_provenance/buildx_sbom) ou variables d'env
@@ -1324,7 +1456,7 @@ cmd_build_push_multiarch() {
     local secret_file=""
     local username_file=""
 
-    if [ -n "$GITHUB_TOKEN" ]; then
+    if [ -n "$GITHUB_TOKEN" ] && [ "$effective_use_git" == "true" ]; then
         # Créer un fichier temporaire pour le secret token
         # Nettoyer le token (enlever espaces, newlines, retours chariot)
         local CLEAN_TOKEN=$(echo "$GITHUB_TOKEN" | tr -d ' \n\r\t')
@@ -1362,7 +1494,7 @@ cmd_build_push_multiarch() {
     log_info "Démarrage du build multi-arch et push..."
     print_separator
 
-    docker buildx build "${build_args[@]}" "${secret_args[@]}" .
+    docker buildx build "${build_args[@]}" "${secret_args[@]}" "$build_context"
 
     # Nettoyer les fichiers de secrets temporaires
     if [ -n "$secret_file" ] && [ -f "$secret_file" ]; then
@@ -1384,6 +1516,7 @@ cmd_release() {
     local no_cache=${3:-false}
     local use_git=${4:-true}
     local git_branch_override=${5:-}
+    local release_multiarch="${RELEASE_MULTIARCH:-auto}"
 
     log_header "RELEASE - Environnement: $env"
 
@@ -1396,16 +1529,36 @@ cmd_release() {
         fi
     fi
 
-    # Vérifier si buildx est disponible pour multi-arch
-    if docker buildx version &>/dev/null; then
-        log_info "Docker Buildx détecté - Build multi-architecture (linux/amd64,linux/arm64)"
-        cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
-    else
-        log_warn "Docker Buildx non disponible - Build pour architecture locale uniquement"
-        # Build local puis push
-        cmd_build "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
-        cmd_push "$env" "$version_tag"
-    fi
+    # Politique multi-arch:
+    # - RELEASE_MULTIARCH=true  : forcer multi-arch (si buildx dispo)
+    # - RELEASE_MULTIARCH=false : forcer single-arch
+    # - RELEASE_MULTIARCH=auto  : ancien comportement (multi-arch si buildx dispo)
+    case "$release_multiarch" in
+        true)
+            if docker buildx version &>/dev/null; then
+                log_info "RELEASE_MULTIARCH=true - Build multi-architecture forcé"
+                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+            else
+                log_error "RELEASE_MULTIARCH=true mais Docker Buildx n'est pas disponible"
+                return 1
+            fi
+            ;;
+        false)
+            log_info "RELEASE_MULTIARCH=false - Build single-architecture"
+            cmd_build "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+            cmd_push "$env" "$version_tag"
+            ;;
+        auto|*)
+            if docker buildx version &>/dev/null; then
+                log_info "Docker Buildx détecté - Build multi-architecture (linux/amd64,linux/arm64)"
+                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+            else
+                log_warn "Docker Buildx non disponible - Build pour architecture locale uniquement"
+                cmd_build "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+                cmd_push "$env" "$version_tag"
+            fi
+            ;;
+    esac
 
     log_success "Release $version_tag créée avec succès!"
 }
@@ -1585,13 +1738,13 @@ show_interactive_menu() {
     echo "  6) Build une image"
     echo "  7) Push une image vers le registry"
     echo "  8) Pull une image depuis le registry"
-    echo "  9) Release (Build + Push)"
+    echo "  9) Release (Build + Push, respecte RELEASE_MULTIARCH)"
     echo " 10) Lister les images locales"
     echo " 11) Lister les tags dans le registry"
     echo " 12) Nettoyer les images locales"
     echo " 13) Inspecter une image"
     echo " 14) Se connecter au registry"
-    echo -e " 15) ${YELLOW}Build + Push Multi-Architecture (amd64+arm64)${NC}"
+    echo -e " 15) ${YELLOW}Build + Push Multi-Architecture FORCÉ (amd64+arm64)${NC}"
     echo " 16) Nettoyer les builders Buildx"
     echo ""
     print_separator
@@ -1835,6 +1988,15 @@ interactive_mode() {
                 env=$(choose_environment) || continue
                 echo ""
 
+                log_warn "Option 15 force un build multi-architecture (amd64+arm64), même si RELEASE_MULTIARCH=false"
+                read -p "Confirmer le mode multi-arch forcé ? (yes/n): " force_multiarch_confirm
+                if [ "$force_multiarch_confirm" != "yes" ]; then
+                    log_info "Opération annulée"
+                    echo ""
+                    read -p "Appuyez sur Entrée pour continuer..."
+                    continue
+                fi
+
                 # Proposer le versioning sémantique
                 version=$(choose_version "$env") || continue
 
@@ -1907,14 +2069,14 @@ ${CYAN}BUILD & RELEASE:${NC}
         --branch <nom>                         Forcer la branche Git à builder
         --profile <name>                       Utiliser un profil spécifique
 
-    build-push-multiarch <env> [version]       Build multi-arch (amd64+arm64) et push
+    build-push-multiarch <env> [version]       Build multi-arch FORCE (amd64+arm64) et push
         --no-cache                             Construire sans cache
         --local                                Utiliser les fichiers locaux (pas Git)
         --branch <nom>                         Forcer la branche Git à builder
 
     push <env> [version]                       Envoyer l'image vers le registry
     pull <env> [version]                       Télécharger l'image depuis le registry
-    release <env> [version] [options]          Build + Push en une commande (arch locale)
+    release <env> [version] [options]          Build + Push (respecte RELEASE_MULTIARCH)
         --branch <nom>                         Forcer la branche Git à builder
 
 ${CYAN}GESTION:${NC}

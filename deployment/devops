@@ -523,6 +523,41 @@ EOF
 
     log_success ".devops.yml.example créé (à versionner)"
 
+    # Ajouter un .dockerignore de base pour éviter des contextes de build énormes
+    if [ ! -f "$CURRENT_PROJECT_DIR/.dockerignore" ]; then
+        cat > "$CURRENT_PROJECT_DIR/.dockerignore" <<'EOF'
+# VCS / IDE
+.git
+.git/*
+.idea
+.vscode
+
+# Python
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets / environnements locaux
+.env
+.env.*
+!.env.example
+
+# Donnees runtime locales (souvent volumineuses)
+airflow-logs-*
+postgres-data-*
+.docker
+logs
+
+# Divers
+.DS_Store
+packages
+EOF
+        log_info ".dockerignore créé (optimisation du contexte de build)"
+    fi
+
     # =========================================================================
     # 2. Création du dossier deployment/ (copie depuis templates)
     # =========================================================================
