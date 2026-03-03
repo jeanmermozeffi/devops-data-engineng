@@ -97,6 +97,22 @@ if [ -z "$PROJECT_ROOT" ]; then
     export PROJECT_ROOT
 fi
 
+# Sur le serveur (pas de .devops.yml), config-loader peut avoir utilisé $(pwd) comme fallback
+# ce qui est incorrect si le script est lancé depuis le répertoire home.
+# → On vérifie que PROJECT_ROOT contient les fichiers attendus, sinon on recalcule depuis SCRIPT_DIR.
+if [ ! -f "$PROJECT_ROOT/.devops.yml" ] && \
+   [ ! -f "$PROJECT_ROOT/docker-compose.registry.yml" ] && \
+   [ ! -f "$PROJECT_ROOT/deployment/docker-compose.registry.yml" ]; then
+    # Sur serveur: le package minimal met scripts/ dans la racine du projet
+    _candidate="$(cd "$SCRIPT_DIR/.." && pwd)"
+    if [ -f "$_candidate/docker-compose.registry.yml" ] || \
+       [ -f "$_candidate/deployment/docker-compose.registry.yml" ]; then
+        PROJECT_ROOT="$_candidate"
+        export PROJECT_ROOT
+    fi
+    unset _candidate
+fi
+
 # Fallback package minimal: si .env.registry est à la racine du script,
 # forcer PROJECT_ROOT sur ce dossier (évite /srv/home/.env.*).
 if [ -f "$SCRIPT_DIR/.env.registry" ] && [ ! -f "$PROJECT_ROOT/.env.registry" ]; then
@@ -104,8 +120,11 @@ if [ -f "$SCRIPT_DIR/.env.registry" ] && [ ! -f "$PROJECT_ROOT/.env.registry" ];
     export PROJECT_ROOT
 fi
 
-# DEPLOYMENT_DIR relatif au projet
-DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-$PROJECT_ROOT/deployment}"
+# DEPLOYMENT_DIR — résoudre en chemin absolu pour éviter les problèmes de CWD
+# après que cmd_status/cmd_restart/cmd_stop aient fait cd "$DEPLOYMENT_DIR"
+if [[ "${DEPLOYMENT_DIR:-}" != /* ]]; then
+    DEPLOYMENT_DIR="$PROJECT_ROOT/${DEPLOYMENT_DIR:-deployment}"
+fi
 # Fallback: package minimal — les fichiers docker-compose sont à la racine du projet
 # (le dossier deployment/ peut exister mais ne contenir que monitoring/, pas les compose)
 if [ ! -f "$DEPLOYMENT_DIR/docker-compose.registry.yml" ] && [ -f "$PROJECT_ROOT/docker-compose.registry.yml" ]; then
@@ -821,19 +840,27 @@ get_compose_files() {
     # --env-file est nécessaire pour la substitution de variables dans le YAML
     # (env_file dans docker-compose.yml charge les variables dans le container, pas pour le parsing YAML)
 
-    # Déterminer le chemin du fichier .env selon le mode de déploiement:
-    # - Mode développement (structure complète): ../..env.${env} (depuis deployment/compose/)
+    # Déterminer le chemin absolu et relatif du fichier .env selon le mode de déploiement:
+    # - Mode développement (structure complète): ../.env.${env} (depuis deployment/)
     # - Mode package minimal (fichiers à la racine): ./.env.${env}
-    local env_file_path
+    local env_file_path env_file_abs
     if [ "$DEPLOYMENT_DIR" = "$PROJECT_ROOT" ]; then
         # Package minimal: tous les fichiers sont à la racine
         env_file_path="./.env.${env}"
+        env_file_abs="$PROJECT_ROOT/.env.${env}"
     else
         # Structure complète: les docker-compose sont dans deployment/
         env_file_path="../.env.${env}"
+        env_file_abs="$PROJECT_ROOT/.env.${env}"
     fi
 
-    echo "--env-file ${env_file_path} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
+    # N'inclure --env-file que si le fichier existe (évite l'échec quand .env est chiffré sur le serveur)
+    local env_file_opt=""
+    if [ -f "$env_file_abs" ]; then
+        env_file_opt="--env-file ${env_file_path}"
+    fi
+
+    echo "${env_file_opt} -f docker-compose.registry.yml -f docker-compose.${env}-registry.yml"
 }
 
 # ============================================================================
@@ -1806,8 +1833,15 @@ interactive_menu() {
                     local services_list
                     services_list=$(cd "$DEPLOYMENT_DIR" && docker compose $(get_compose_files "$env") config --services 2>/dev/null) || true
                     if [ -z "$services_list" ]; then
-                        log_warn "Impossible de lire les services. Vérifiez que les fichiers docker-compose existent."
-                        read -p "Appuyez sur Entrée pour revenir au menu principal..."
+                        log_warn "Impossible de lire la liste des services (fichiers compose ou .env inaccessibles)."
+                        log_info "Affichage de tous les logs — Ctrl+C pour revenir au menu..."
+                        sleep 2
+                        trap '' INT
+                        cmd_logs "$env" "" || true
+                        trap - INT
+                        echo ""
+                        log_info "Logs arrêtés. Retour au menu..."
+                        sleep 1
                         continue
                     fi
 
@@ -1835,7 +1869,12 @@ interactive_menu() {
                     echo ""
                     log_info "Appuyez sur Ctrl+C pour revenir au menu principal"
                     sleep 2
-                    cmd_logs "$env" "$service"
+                    trap '' INT
+                    cmd_logs "$env" "$service" || true
+                    trap - INT
+                    echo ""
+                    log_info "Logs arrêtés. Retour au menu..."
+                    sleep 1
                 fi
                 ;;
             5)
@@ -2297,25 +2336,35 @@ cmd_logs() {
     local compose_ids
     compose_ids=$(docker compose $(get_compose_files "$env") ps -q 2>/dev/null) || true
 
+    # Wrapper : lance une commande de logs en arrière-plan et attend proprement Ctrl+C
+    _run_log_cmd() {
+        local log_pid
+        "$@" &
+        log_pid=$!
+        trap 'kill $log_pid 2>/dev/null' INT TERM
+        wait $log_pid 2>/dev/null || true
+        trap - INT TERM
+    }
+
     if [ -n "$service" ]; then
         log_header "LOGS - $service ($env)"
         if [ -n "$compose_ids" ]; then
-            docker compose $(get_compose_files "$env") logs -f "$service"
+            _run_log_cmd docker compose $(get_compose_files "$env") logs -f "$service"
         else
             # Fallback: docker logs direct — pattern: PROJECT-service_tiret-ENV
             local container="${PROJECT_NAME}-${service//_/-}-${env}"
             if docker inspect "$container" >/dev/null 2>&1; then
                 log_info "docker compose ne trouve pas les conteneurs — utilisation de docker logs pour '$container'"
-                docker logs -f "$container"
+                _run_log_cmd docker logs -f "$container"
             else
                 log_warn "Conteneur '$container' non trouvé, tentative docker compose..."
-                docker compose $(get_compose_files "$env") logs -f "$service"
+                _run_log_cmd docker compose $(get_compose_files "$env") logs -f "$service"
             fi
         fi
     else
         log_header "LOGS - tous les services ($env)"
         if [ -n "$compose_ids" ]; then
-            docker compose $(get_compose_files "$env") logs -f
+            _run_log_cmd docker compose $(get_compose_files "$env") logs -f
         else
             # Fallback: chercher les conteneurs par pattern de nom (PROJECT_NAME-*-ENV)
             local containers
@@ -2336,7 +2385,7 @@ cmd_logs() {
                 trap - INT TERM
             else
                 log_warn "Aucun conteneur trouvé pour ${PROJECT_NAME}-*-${env}"
-                docker compose $(get_compose_files "$env") logs -f
+                _run_log_cmd docker compose $(get_compose_files "$env") logs -f
             fi
         fi
     fi

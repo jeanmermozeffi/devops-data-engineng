@@ -207,7 +207,7 @@ configure_ssh() {
 
     # Vérifier si une configuration existe déjà
     if [ -n "$SSH_HOST" ]; then
-        log_info "Configuration SSH détectée depuis .env.deployment:"
+        log_info "Configuration serveur détectée depuis .devops.yml:"
         echo ""
         print_separator
         echo -e "${WHITE}Configuration actuelle:${NC}"

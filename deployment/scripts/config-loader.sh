@@ -332,6 +332,21 @@ load_devops_config() {
     nested_value=$(get_nested_yaml_value "git" "prod_branch" "$config_file")
     [ -n "$nested_value" ] && { PROD_BRANCH="$nested_value"; export PROD_BRANCH; }
 
+    nested_value=$(get_nested_yaml_value "server" "host" "$config_file")
+    [ -n "$nested_value" ] && { SERVER_HOST="$nested_value"; export SERVER_HOST; }
+
+    nested_value=$(get_nested_yaml_value "server" "user" "$config_file")
+    [ -n "$nested_value" ] && { SERVER_USER="$nested_value"; export SERVER_USER; }
+
+    nested_value=$(get_nested_yaml_value "server" "port" "$config_file")
+    [ -n "$nested_value" ] && { SERVER_PORT="$nested_value"; export SERVER_PORT; }
+
+    nested_value=$(get_nested_yaml_value "server" "ssh_key" "$config_file")
+    [ -n "$nested_value" ] && { SERVER_SSH_KEY="$nested_value"; export SERVER_SSH_KEY; }
+
+    nested_value=$(get_nested_yaml_value "server" "deploy_path" "$config_file")
+    [ -n "$nested_value" ] && { SERVER_DEPLOY_PATH="$nested_value"; export SERVER_DEPLOY_PATH; }
+
     # Normaliser une URL de repo Git en format clonable HTTPS
     normalize_git_repo_url() {
         local repo="$1"
