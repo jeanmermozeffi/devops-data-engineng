@@ -86,6 +86,24 @@ get_registry_description() {
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ============================================================================
+# DÉTECTION DOCKER / DOCKER COMPOSE
+# Les sessions SSH non-interactives n'ont pas toujours /usr/local/bin dans PATH
+# ============================================================================
+for _docker_dir in /usr/local/bin /usr/bin /snap/bin /opt/homebrew/bin; do
+    if [ -x "$_docker_dir/docker" ] && ! command -v docker >/dev/null 2>&1; then
+        export PATH="$_docker_dir:$PATH"
+    fi
+done
+unset _docker_dir
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR]${NC} Commande 'docker' introuvable." >&2
+    echo -e "${RED}[ERROR]${NC} Installez Docker: https://docs.docker.com/engine/install/" >&2
+    echo -e "${YELLOW}[INFO]${NC}  Chemins vérifiés: /usr/local/bin /usr/bin /snap/bin" >&2
+    exit 1
+fi
+
 # Charger la configuration depuis .devops.yml (définit PROJECT_ROOT, PROJECT_NAME, etc.)
 # Ne pas échouer si le fichier n'existe pas (package minimal sur serveur)
 source "$SCRIPT_DIR/config-loader.sh"
@@ -915,6 +933,24 @@ check_image_exists() {
     local image_full=$1
 
     log_info "Vérification de l'image dans le registry..."
+
+    # Pour Docker Hub, utiliser l'API REST (plus fiable que docker manifest inspect
+    # qui est soumis aux rate limits anonymes de Docker Hub)
+    if [ "${REGISTRY_TYPE:-dockerhub}" = "dockerhub" ]; then
+        local repository
+        repository=$(get_registry_repository)
+        local tag="${image_full##*:}"
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/${repository}/tags/${tag}")
+        if [ "$http_code" = "200" ]; then
+            log_success "Image trouvée: $image_full"
+            return 0
+        else
+            log_error "Image non trouvée: $image_full"
+            return 1
+        fi
+    fi
 
     if docker manifest inspect "$image_full" >/dev/null 2>&1; then
         log_success "Image trouvée: $image_full"
@@ -2377,6 +2413,25 @@ cmd_deploy() {
     echo "  - Logs:    ./deploy-registry.sh logs $env"
     echo "  - Status:  ./deploy-registry.sh status $env"
     echo "  - Stop:    ./deploy-registry.sh stop $env"
+
+    # Hint monitoring agents pour les stacks qui en ont besoin
+    case "${STACK_TYPE:-}" in
+        orchestrator|streaming-kafka)
+            if get_monitoring_agent_dir >/dev/null 2>&1; then
+                echo ""
+                log_info "Agents monitoring disponibles (stack '${STACK_TYPE}'):"
+                echo "  - Démarrer : ./deploy-registry.sh monitoring-agent $env up"
+                echo "  - Statut   : ./deploy-registry.sh monitoring-agent $env status"
+            fi
+            ;;
+        reporting-superset)
+            if [ -f "./scripts/superset-import.sh" ]; then
+                echo ""
+                log_info "Imports Superset disponibles (stack '${STACK_TYPE}'):"
+                echo "  - Importer : ./deploy-registry.sh superset-import $env"
+            fi
+            ;;
+    esac
 
     # Nettoyer les fichiers temporaires
     cleanup_on_error
