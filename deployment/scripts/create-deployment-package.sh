@@ -97,8 +97,53 @@ PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
 
 # Option de chiffrement (désactivé par défaut)
 ENCRYPT_ENV_FILES="${ENCRYPT_ENV_FILES:-false}"
-# Inclure les outils Superset (superset_manager + exports YAML) si dispo
-INCLUDE_SUPERSET_ASSETS="${INCLUDE_SUPERSET_ASSETS:-auto}"
+# Inclure les outils Superset et les agents monitoring.
+# Valeurs: true|false|auto|required
+# Vide = sera défini par configure_stack_assets() selon le stack_type.
+# Surchargeable via variable d'environnement ou .env.deployment avant l'appel.
+INCLUDE_SUPERSET_ASSETS="${INCLUDE_SUPERSET_ASSETS:-}"
+INCLUDE_MONITORING="${INCLUDE_MONITORING:-}"
+
+# Configurer les assets selon le stack_type.
+# Respecte les surcharges explicites (env ou .env.deployment) si déjà définies.
+# Appelé au début de create_package().
+configure_stack_assets() {
+    local stack="${STACK_TYPE:-}"
+    log_info "Stack type: ${stack:-non défini}"
+
+    case "$stack" in
+        orchestrator)
+            # Airflow + Talend: agents monitoring obligatoires
+            [ -z "${INCLUDE_MONITORING}" ]      && INCLUDE_MONITORING="required"
+            [ -z "${INCLUDE_SUPERSET_ASSETS}" ] && INCLUDE_SUPERSET_ASSETS="false"
+            log_info "  → Agents monitoring : requis | Superset : non"
+            ;;
+        streaming-kafka)
+            # Kafka: agents monitoring obligatoires
+            [ -z "${INCLUDE_MONITORING}" ]      && INCLUDE_MONITORING="required"
+            [ -z "${INCLUDE_SUPERSET_ASSETS}" ] && INCLUDE_SUPERSET_ASSETS="false"
+            log_info "  → Agents monitoring : requis | Superset : non"
+            ;;
+        reporting-superset)
+            # Superset BI: assets Superset obligatoires, monitoring optionnel
+            [ -z "${INCLUDE_MONITORING}" ]      && INCLUDE_MONITORING="auto"
+            [ -z "${INCLUDE_SUPERSET_ASSETS}" ] && INCLUDE_SUPERSET_ASSETS="true"
+            log_info "  → Agents monitoring : optionnel | Superset : requis"
+            ;;
+        monitoring)
+            # Stack monitoring central: pas d'agents secondaires (il EST le monitoring)
+            [ -z "${INCLUDE_MONITORING}" ]      && INCLUDE_MONITORING="false"
+            [ -z "${INCLUDE_SUPERSET_ASSETS}" ] && INCLUDE_SUPERSET_ASSETS="false"
+            log_info "  → Stack monitoring central (agents secondaires non inclus)"
+            ;;
+        *)
+            # fastapi-redis, api, etc.: tout optionnel (inclus si présent)
+            [ -z "${INCLUDE_MONITORING}" ]      && INCLUDE_MONITORING="auto"
+            [ -z "${INCLUDE_SUPERSET_ASSETS}" ] && INCLUDE_SUPERSET_ASSETS="auto"
+            log_info "  → Agents monitoring : optionnel | Superset : optionnel"
+            ;;
+    esac
+}
 
 resolve_monitoring_dir_for_package() {
     local candidate
@@ -309,6 +354,9 @@ create_package() {
     print_header "Création du package"
     echo ""
 
+    # Configurer les assets selon le stack_type
+    configure_stack_assets
+
     # Nettoyer et créer le dossier
     log_info "Préparation du dossier..."
     rm -rf "$PACKAGE_DIR"
@@ -331,27 +379,37 @@ create_package() {
         fi
     done
 
-    # Inclure les composants monitoring cote projet (agents uniquement)
-    MONITORING_DIR_SRC="$(resolve_monitoring_dir_for_package || true)"
-    if [ -n "$MONITORING_DIR_SRC" ] && [ -d "$MONITORING_DIR_SRC" ]; then
-        mkdir -p "$PACKAGE_DIR/deployment"
-        mkdir -p "$PACKAGE_DIR/deployment/monitoring"
+    # Inclure les agents monitoring selon le stack_type
+    if [ "${INCLUDE_MONITORING}" != "false" ]; then
+        MONITORING_DIR_SRC="$(resolve_monitoring_dir_for_package || true)"
+        if [ -n "$MONITORING_DIR_SRC" ] && [ -d "$MONITORING_DIR_SRC" ]; then
+            mkdir -p "$PACKAGE_DIR/deployment/monitoring"
 
-        if [ -f "$MONITORING_DIR_SRC/README.md" ]; then
-            cp "$MONITORING_DIR_SRC/README.md" "$PACKAGE_DIR/deployment/monitoring/"
-        fi
-        if [ -f "$MONITORING_DIR_SRC/compose-labels-snippet.yml" ]; then
-            cp "$MONITORING_DIR_SRC/compose-labels-snippet.yml" "$PACKAGE_DIR/deployment/monitoring/"
-        fi
-        if [ -d "$MONITORING_DIR_SRC/agents" ]; then
-            cp -r "$MONITORING_DIR_SRC/agents" "$PACKAGE_DIR/deployment/monitoring/"
-            log_success "✓ deployment/monitoring/agents copié depuis: $MONITORING_DIR_SRC"
+            if [ -f "$MONITORING_DIR_SRC/README.md" ]; then
+                cp "$MONITORING_DIR_SRC/README.md" "$PACKAGE_DIR/deployment/monitoring/"
+            fi
+            if [ -f "$MONITORING_DIR_SRC/compose-labels-snippet.yml" ]; then
+                cp "$MONITORING_DIR_SRC/compose-labels-snippet.yml" "$PACKAGE_DIR/deployment/monitoring/"
+            fi
+            if [ -d "$MONITORING_DIR_SRC/agents" ]; then
+                cp -r "$MONITORING_DIR_SRC/agents" "$PACKAGE_DIR/deployment/monitoring/"
+                log_success "✓ deployment/monitoring/agents copié depuis: $MONITORING_DIR_SRC"
+            else
+                log_warn "⚠️  Dossier agents/ non trouvé dans $MONITORING_DIR_SRC"
+            fi
         else
-            log_warn "⚠️  Dossier agents non trouvé dans $MONITORING_DIR_SRC"
+            if [ "${INCLUDE_MONITORING}" = "required" ]; then
+                log_error "Agents monitoring REQUIS pour le stack '${STACK_TYPE}' mais introuvables"
+                log_error "Attendu: $PROJECT_DIR/$DEPLOYMENT_SUBDIR/monitoring"
+                log_info "Conseil: créez le dossier deployment/monitoring/agents/ dans le projet"
+                exit 1
+            else
+                log_info "Agents monitoring non détectés (optionnel pour ce stack)"
+                log_info "Astuce: définissez DEVOPS_MONITORING_SOURCE pour forcer la source"
+            fi
         fi
     else
-        log_info "Dossier deployment/monitoring non détecté (optionnel)"
-        log_info "Définissez DEVOPS_MONITORING_SOURCE pour forcer la source monitoring"
+        log_info "Agents monitoring exclus (stack '${STACK_TYPE}')"
     fi
 
     # Ajuster les chemins relatifs dans les fichiers docker-compose pour le package minimal
@@ -462,20 +520,22 @@ create_package() {
         log_info "Aucune ressource locale détectée (images officielles uniquement)"
     fi
 
-    # Forcer la copie du fichier Superset config si présent
+    # Copier superset_config.py uniquement pour les stacks Superset
     # (évite le cas où Docker crée un dossier config/superset_config.py si le fichier manque)
-    local superset_config_src="$PROJECT_DIR/config/superset_config.py"
-    local superset_config_dest_dir="$PACKAGE_DIR/config"
-    local superset_config_dest="$superset_config_dest_dir/superset_config.py"
-    if [ -f "$superset_config_src" ]; then
-        mkdir -p "$superset_config_dest_dir"
-        if [ -d "$superset_config_dest" ]; then
-            rm -rf "$superset_config_dest"
+    if [ "${INCLUDE_SUPERSET_ASSETS}" != "false" ]; then
+        local superset_config_src="$PROJECT_DIR/config/superset_config.py"
+        local superset_config_dest_dir="$PACKAGE_DIR/config"
+        local superset_config_dest="$superset_config_dest_dir/superset_config.py"
+        if [ -f "$superset_config_src" ]; then
+            mkdir -p "$superset_config_dest_dir"
+            if [ -d "$superset_config_dest" ]; then
+                rm -rf "$superset_config_dest"
+            fi
+            cp "$superset_config_src" "$superset_config_dest"
+            log_success "✓ config/superset_config.py copié"
+        elif [ "${INCLUDE_SUPERSET_ASSETS}" = "true" ]; then
+            log_warn "⚠️  config/superset_config.py introuvable (requis pour stack '${STACK_TYPE}')"
         fi
-        cp "$superset_config_src" "$superset_config_dest"
-        log_success "✓ config/superset_config.py copié (forcé)"
-    else
-        log_warn "⚠️  config/superset_config.py introuvable dans le projet"
     fi
 
     # Copier les vrais fichiers .env depuis la racine du projet
@@ -515,7 +575,8 @@ create_package() {
     # - scripts/superset_manager.py
     # - scripts/requirements.txt
     # - exports/**/yaml + exports/manifest.json (pas de ZIP)
-    if [ "$INCLUDE_SUPERSET_ASSETS" = "auto" ]; then
+    # Résolution auto: inclure si superset_manager.py est présent
+    if [ "${INCLUDE_SUPERSET_ASSETS:-auto}" = "auto" ]; then
         if [ -f "$PROJECT_DIR/scripts/superset_manager.py" ]; then
             INCLUDE_SUPERSET_ASSETS="true"
         else

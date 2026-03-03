@@ -1364,7 +1364,7 @@ cmd_build_push_multiarch() {
     log_info "Image: $full_image_name"
     log_info "Branche Git: $git_branch"
     log_info "Tag: $version_tag"
-    log_info "Mode: Build multi-architecture (linux/amd64,linux/arm64)"
+    log_info "Mode: Build multi-architecture (${RELEASE_PLATFORMS:-linux/amd64,linux/arm64})"
     log_info "Push direct vers registry (pas de chargement local)"
 
     # Créer ou utiliser un builder buildx
@@ -1398,9 +1398,10 @@ cmd_build_push_multiarch() {
     local app_python_path="${APP_PYTHON_PATH:-}"
     local airflow_version="${AIRFLOW_VERSION:-3.0.1}"
     local airflow_base_image="${AIRFLOW_BASE_IMAGE:-apache/airflow:${airflow_version}-python3.11}"
+    local build_platforms="${RELEASE_PLATFORMS:-linux/amd64,linux/arm64}"
     local build_args=(
         "--file" "$dockerfile"
-        "--platform" "linux/amd64,linux/arm64"
+        "--platform" "$build_platforms"
         "--build-arg" "GIT_BRANCH=$git_branch"
         "--build-arg" "GIT_REPO=$git_repo_build"
         "--build-arg" "APP_SOURCE_DIR=$app_source_dir"
