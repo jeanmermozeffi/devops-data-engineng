@@ -1503,22 +1503,44 @@ cmd_build_push_multiarch() {
     fi
 
     # Cache registry (inline pour Docker Hub, registry pour les autres)
-    # Réutilise les layers entre les builds → gain majeur sur apt-get et pip install
+    # Réutilise les layers entre les builds -> gain majeur sur apt-get et pip install.
+    # Important: --cache-from est ajouté seulement si la ref distante existe.
     local cache_ref="${REGISTRY_URL:-docker.io}/${REGISTRY_USERNAME}/${IMAGE_NAME:-cicbi-kafka-platform}:buildcache-${env}"
+    local cache_from_added=false
     if [ "$no_cache" == "true" ]; then
         build_args+=("--no-cache")
         log_info "Cache désactivé (--no-cache)"
     else
         if [ "${REGISTRY_TYPE:-dockerhub}" == "dockerhub" ]; then
             # Docker Hub: cache inline (stocké dans les layers de l'image)
-            build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+            if docker manifest inspect "$full_image_latest" >/dev/null 2>&1; then
+                build_args+=("--cache-from" "type=registry,ref=${full_image_latest}")
+                cache_from_added=true
+                log_info "Cache source: ${full_image_latest}"
+            elif docker manifest inspect "$cache_ref" >/dev/null 2>&1; then
+                # Compatibilité ancienne config cache dédiée.
+                build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+                cache_from_added=true
+                log_info "Cache source (legacy): ${cache_ref}"
+            else
+                log_warn "Aucun cache distant trouvé (premier build ou cache absent), build sans cache-from"
+            fi
             build_args+=("--cache-to" "type=inline")
         else
             # Registries OCI (GHCR, ECR, etc.): cache externe mode=max
-            build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+            if docker manifest inspect "$cache_ref" >/dev/null 2>&1; then
+                build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+                cache_from_added=true
+                log_info "Cache source: ${cache_ref}"
+            else
+                log_warn "Cache registry absent: ${cache_ref} (import ignoré)"
+            fi
             build_args+=("--cache-to" "type=registry,ref=${cache_ref},mode=max")
         fi
-        log_info "Cache registry: ${cache_ref}"
+        if [ "$cache_from_added" = false ]; then
+            log_info "Cache import: désactivé (ref introuvable)"
+        fi
+        log_info "Cache export: ${cache_ref}"
     fi
 
     # Build et push
