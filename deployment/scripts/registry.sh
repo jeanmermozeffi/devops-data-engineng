@@ -1119,7 +1119,7 @@ cmd_build() {
         buildx_builder="devops-builder"
         if ! docker buildx inspect "$buildx_builder" &>/dev/null; then
             log_info "Création du builder Docker Buildx: $buildx_builder"
-            docker buildx create --name "$buildx_builder" --driver docker-container --bootstrap --use
+            docker buildx create --name "$buildx_builder" --driver docker-container --driver-opt network=host --bootstrap --use
         else
             log_info "Utilisation du builder existant: $buildx_builder"
             docker buildx use "$buildx_builder"
@@ -1387,7 +1387,7 @@ cmd_build_push_multiarch() {
     local buildx_builder="devops-builder"
     if ! docker buildx inspect "$buildx_builder" &>/dev/null; then
         log_info "Création du builder Docker Buildx: $buildx_builder"
-        docker buildx create --name "$buildx_builder" --driver docker-container --bootstrap --use
+        docker buildx create --name "$buildx_builder" --driver docker-container --driver-opt network=host --bootstrap --use
     else
         log_info "Utilisation du builder existant: $buildx_builder"
         docker buildx use "$buildx_builder"
@@ -1502,9 +1502,23 @@ cmd_build_push_multiarch() {
         fi
     fi
 
-    # No cache
+    # Cache registry (inline pour Docker Hub, registry pour les autres)
+    # Réutilise les layers entre les builds → gain majeur sur apt-get et pip install
+    local cache_ref="${REGISTRY_URL:-docker.io}/${REGISTRY_USERNAME}/${IMAGE_NAME:-cicbi-kafka-platform}:buildcache-${env}"
     if [ "$no_cache" == "true" ]; then
         build_args+=("--no-cache")
+        log_info "Cache désactivé (--no-cache)"
+    else
+        if [ "${REGISTRY_TYPE:-dockerhub}" == "dockerhub" ]; then
+            # Docker Hub: cache inline (stocké dans les layers de l'image)
+            build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+            build_args+=("--cache-to" "type=inline")
+        else
+            # Registries OCI (GHCR, ECR, etc.): cache externe mode=max
+            build_args+=("--cache-from" "type=registry,ref=${cache_ref}")
+            build_args+=("--cache-to" "type=registry,ref=${cache_ref},mode=max")
+        fi
+        log_info "Cache registry: ${cache_ref}"
     fi
 
     # Build et push
