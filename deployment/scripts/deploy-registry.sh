@@ -595,7 +595,8 @@ get_env_file() {
     # Sur le serveur, chercher les fichiers chiffrés
     if is_server_environment; then
         local encrypted_env="$DEPLOYMENT_DIR/.env.${env}.encrypted"
-        local temp_env="/tmp/.env.${env}.$$"
+        local temp_env
+        temp_env=$(mktemp "/tmp/.env.${env}.XXXXXX")
 
         # Vérifier si le fichier chiffré existe ET est non vide (-s)
         # Un fichier de 0 octet est un placeholder (package minimal) → fallback sur .env plain
@@ -617,21 +618,21 @@ get_env_file() {
                 python_cmd="$DEPLOYMENT_DIR/.venv/bin/python3"
             fi
 
-            # Déchiffrer le fichier
-            if $python_cmd "$encrypt_script" decrypt "$encrypted_env" >/dev/null 2>&1; then
-                local decrypted_file="$DEPLOYMENT_DIR/.env.${env}"
-                if [ -f "$decrypted_file" ]; then
-                    # Copier vers un fichier temporaire
-                    cp "$decrypted_file" "$temp_env"
-                    # Supprimer le fichier déchiffré
-                    rm -f "$decrypted_file"
+            # Déchiffrer directement vers un fichier temporaire pour éviter
+            # les conflits si .env.<env> existe déjà (fichier ou dossier).
+            if $python_cmd "$encrypt_script" decrypt "$encrypted_env" -o "$temp_env" >/dev/null 2>&1; then
+                if [ -f "$temp_env" ]; then
                     env_file_path="$temp_env"
                     log_success "Fichier .env.$env déchiffré avec succès" >&2
                     echo "$env_file_path"
                     return 0
                 fi
+                log_error "Fichier temporaire déchiffré introuvable: $temp_env" >&2
+                rm -f "$temp_env"
+                return 1
             else
                 log_error "Échec du déchiffrement de .env.$env" >&2
+                rm -f "$temp_env"
                 return 1
             fi
         else
@@ -2246,6 +2247,12 @@ cmd_deploy() {
         # Créer le répertoire parent si nécessaire
         local target_dir=$(dirname "$target_env_file")
         mkdir -p "$target_dir"
+
+        if [ -d "$target_env_file" ]; then
+            local backup_env_dir="${target_env_file}.bak.$(date +%Y%m%d%H%M%S)"
+            log_warn "$target_env_file existe en dossier, renommage en: $backup_env_dir"
+            mv "$target_env_file" "$backup_env_dir"
+        fi
 
         log_info "Copie du fichier .env vers $target_env_file..."
         cp -f "$env_file" "$target_env_file"
