@@ -70,30 +70,87 @@ PACKAGES_BASE_DIR="$(dirname "$SCRIPT_DIR")/../packages"
 mkdir -p "$PACKAGES_BASE_DIR"
 DEPLOYMENT_SUBDIR="${DEPLOYMENT_DIR:-deployment}"
 
+# Identité projet (source de vérité pour le nom du package local)
+PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
+
+# Déterminer le suffixe d'environnement (dev/staging/prod) depuis ENV ou server_deploy_path
+detect_deploy_env_suffix() {
+    local env_candidate="${ENV:-}"
+    local path_basename=""
+
+    if [ -z "$env_candidate" ] && [ -n "${SERVER_DEPLOY_PATH:-}" ]; then
+        path_basename="$(basename "$SERVER_DEPLOY_PATH")"
+        if [[ "$path_basename" =~ -(dev|staging|prod)$ ]]; then
+            env_candidate="${BASH_REMATCH[1]}"
+        fi
+    fi
+
+    case "$env_candidate" in
+        dev|staging|prod) echo "$env_candidate" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Déterminer un stack_type fiable, y compris quand .devops.yml est imbriqué.
+detect_effective_stack_type() {
+    local stack="${STACK_TYPE:-}"
+    local config_file="${PROJECT_DIR}/.devops.yml"
+    local detected=""
+
+    if [ -n "$config_file" ] && [ -f "$config_file" ]; then
+        detected="$(sed -nE 's/^[[:space:]]*stack_type:[[:space:]]*["'\'']?([^"'\''#[:space:]]+)["'\'']?.*$/\1/p' "$config_file" | head -n1)"
+    fi
+
+    if [ -n "$detected" ]; then
+        stack="$detected"
+    fi
+
+    echo "${stack:-fastapi-redis}"
+}
+
+# Construire le chemin package local.
+# PACKAGE_NAME_MODE:
+# - fixed   : toujours PROJECT_NAME
+# - derived : PROJECT_NAME-<env> si env détecté
+# - auto    : comme derived, sauf streaming-kafka => fixed
+resolve_package_dir() {
+    local mode="${PACKAGE_NAME_MODE:-auto}"
+    local effective_stack=""
+    local env_suffix=""
+    local package_name="$PROJECT_NAME"
+    effective_stack="$(detect_effective_stack_type)"
+
+    if [ "$mode" = "auto" ] && [ "$effective_stack" = "streaming-kafka" ]; then
+        mode="fixed"
+    fi
+
+    if [ "$mode" = "derived" ] || [ "$mode" = "auto" ]; then
+        env_suffix="$(detect_deploy_env_suffix)"
+        if [ -n "$env_suffix" ] && [[ "$package_name" != *"-${env_suffix}" ]]; then
+            package_name="${package_name}-${env_suffix}"
+        fi
+    fi
+
+    echo "${PACKAGES_BASE_DIR}/${package_name}"
+}
+
 # Mapper les variables SSH depuis .devops.yml (SERVER_*) vers les variables du script (SSH_*)
 SSH_TRANSFER=false
 SSH_HOST="${SERVER_HOST:-${SSH_HOST:-}}"
 SSH_USER="${SERVER_USER:-${SSH_USER:-root}}"
 SSH_PORT="${SERVER_PORT:-${SSH_PORT:-22}}"
-SSH_PATH="${SERVER_DEPLOY_PATH:-${SSH_PATH:-/srv/$(basename "$PROJECT_DIR")}}"
+SSH_PATH="${SERVER_DEPLOY_PATH:-${SSH_PATH:-/srv/home/${PROJECT_NAME}}}"
 SSH_USE_PASSWORD=false
 SSH_IDENTITY_FILE="${SERVER_SSH_KEY:-${SSH_IDENTITY_FILE:-}}"
 
-# Par défaut, aligner le nom du dossier de package sur le chemin de déploiement serveur
-DEFAULT_PACKAGE_NAME="$(basename "$SSH_PATH")"
-# Si server_deploy_path est défini, on force le dossier du package à ce nom
-if [ -n "$SERVER_DEPLOY_PATH" ] || [ -n "$SSH_PATH" ]; then
-    PACKAGE_DIR="$PACKAGES_BASE_DIR/$DEFAULT_PACKAGE_NAME"
-else
-    PACKAGE_DIR="${PACKAGE_DIR:-$PACKAGES_BASE_DIR/$(basename "$PROJECT_DIR")}"
-fi
+# Nom du package local (dynamique selon mode + stack)
+PACKAGE_DIR="${PACKAGE_DIR:-$(resolve_package_dir)}"
 
 # Registry depuis .devops.yml (avec fallback)
 REGISTRY_TYPE="${REGISTRY_TYPE:-dockerhub}"
 REGISTRY_URL="${REGISTRY_URL:-docker.io}"
 REGISTRY_USERNAME="${REGISTRY_USERNAME:-}"
 IMAGE_NAME="${IMAGE_NAME:-$(basename "$PROJECT_DIR")}"
-PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
 
 # Option de chiffrement (désactivé par défaut)
 ENCRYPT_ENV_FILES="${ENCRYPT_ENV_FILES:-false}"
@@ -1589,8 +1646,26 @@ advanced_config() {
     print_header "Configuration avancée"
     echo ""
 
-    # Chemin du package
-    ask_input "Chemin du package" "$PACKAGE_DIR" PACKAGE_DIR
+    # Mode de nommage du package local
+    echo -e "${WHITE}Mode de nommage du package local:${NC}"
+    echo -e "  ${CYAN}auto${NC}    : dérive -env sauf stack streaming-kafka"
+    echo -e "  ${CYAN}fixed${NC}   : nom fixe (PROJECT_NAME)"
+    echo -e "  ${CYAN}derived${NC} : dérive -env si détecté"
+    echo ""
+    ask_input "Mode (auto/fixed/derived)" "${PACKAGE_NAME_MODE:-auto}" PACKAGE_NAME_MODE
+
+    case "$PACKAGE_NAME_MODE" in
+        auto|fixed|derived) ;;
+        *)
+            log_warn "Mode invalide '${PACKAGE_NAME_MODE}', utilisation de 'auto'"
+            PACKAGE_NAME_MODE="auto"
+            ;;
+    esac
+
+    # Chemin du package (proposé dynamiquement selon le mode)
+    local suggested_package_dir
+    suggested_package_dir="$(resolve_package_dir)"
+    ask_input "Chemin du package" "$suggested_package_dir" PACKAGE_DIR
 
     echo ""
     log_info "Les fichiers .env réels seront automatiquement:"
