@@ -1938,6 +1938,12 @@ interactive_menu() {
                     # Lire dynamiquement les services depuis les fichiers docker-compose
                     local services_list
                     services_list=$(cd "$DEPLOYMENT_DIR" && docker compose $(get_compose_files "$env") config --services 2>/dev/null) || true
+                    # Fallback: lire les services depuis les conteneurs actifs via labels Docker Compose
+                    if [ -z "$services_list" ]; then
+                        services_list=$(docker ps \
+                            --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+                            --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | sort -u) || true
+                    fi
                     if [ -z "$services_list" ]; then
                         log_warn "Impossible de lire la liste des services (fichiers compose ou .env inaccessibles)."
                         log_info "Affichage de tous les logs — Ctrl+C pour revenir au menu..."
