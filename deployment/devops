@@ -110,6 +110,7 @@ load_project_config() {
             server_user) export SERVER_USER="$value" ;;
             server_ssh_key) export SERVER_SSH_KEY="$value" ;;
             server_deploy_path) export SERVER_DEPLOY_PATH="$value" ;;
+            monitoring_servers_file) export MONITORING_SERVERS_FILE="$value" ;;
             # Structure du projet
             app_source_dir) export APP_SOURCE_DIR="$value" ;;
             app_dest_dir) export APP_DEST_DIR="$value" ;;
@@ -484,6 +485,9 @@ server_ssh_key: ~/.ssh/id_rsa
 
 # Répertoire de déploiement sur le serveur distant
 server_deploy_path: /home/deploy/apps
+
+# Fichier d'inventaire des serveurs monitoring (multi-host)
+monitoring_servers_file: .devops.monitoring-servers.yml
 EOF
 
     log_success ".devops.yml créé"
@@ -851,6 +855,74 @@ cmd_deploy_registry() {
     bash "$deploy_registry_script" "$@"
 }
 
+select_env_numbered() {
+    echo ""
+    echo "Environnement:"
+    echo "  1) dev"
+    echo "  2) staging"
+    echo "  3) prod"
+    echo "  0) annuler"
+    read -r -p "Choix [3]: " env_choice
+    env_choice="${env_choice:-3}"
+
+    case "$env_choice" in
+        1|dev)
+            SELECTED_ENV="dev"
+            ;;
+        2|staging)
+            SELECTED_ENV="staging"
+            ;;
+        3|prod)
+            SELECTED_ENV="prod"
+            ;;
+        0|cancel|annuler|q|Q)
+            return 1
+            ;;
+        *)
+            log_warn "Choix invalide, utilisation de 'prod'"
+            SELECTED_ENV="prod"
+            ;;
+    esac
+}
+
+select_monitoring_agent_action_numbered() {
+    echo ""
+    echo "Action agent:"
+    echo "  1) status"
+    echo "  2) up"
+    echo "  3) restart"
+    echo "  4) down"
+    echo "  5) logs"
+    echo "  0) annuler"
+    read -r -p "Choix [1]: " action_choice
+    action_choice="${action_choice:-1}"
+
+    case "$action_choice" in
+        1|status)
+            SELECTED_AGENT_ACTION="status"
+            ;;
+        2|up)
+            SELECTED_AGENT_ACTION="up"
+            ;;
+        3|restart)
+            SELECTED_AGENT_ACTION="restart"
+            ;;
+        4|down)
+            SELECTED_AGENT_ACTION="down"
+            ;;
+        5|logs)
+            SELECTED_AGENT_ACTION="logs"
+            ;;
+        0|cancel|annuler|q|Q)
+            return 1
+            ;;
+        *)
+            log_warn "Choix invalide, utilisation de 'status'"
+            SELECTED_AGENT_ACTION="status"
+            ;;
+    esac
+}
+
 cmd_monitoring_agent() {
     load_project_config
     export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
@@ -862,12 +934,55 @@ cmd_monitoring_agent() {
     fi
 
     if [ $# -lt 1 ]; then
+        if [ -t 0 ]; then
+            local agent_env agent_action agent_extra
+            if ! select_env_numbered; then
+                log_info "Action annulée"
+                return 0
+            fi
+            agent_env="$SELECTED_ENV"
+            if ! select_monitoring_agent_action_numbered; then
+                log_info "Action annulée"
+                return 0
+            fi
+            agent_action="$SELECTED_AGENT_ACTION"
+            if [ "$agent_action" = "logs" ]; then
+                read -r -p "Service logs (vide=tous): " agent_extra
+            elif [ "$agent_action" = "up" ]; then
+                read -r -p "Profiles CSV (ex: airflow,postgres,redis): " agent_extra
+            else
+                agent_extra=""
+            fi
+
+            log_info "Appel du script: $deploy_registry_script monitoring-agent $agent_env $agent_action ${agent_extra:-}"
+            if [ -n "${agent_extra:-}" ]; then
+                bash "$deploy_registry_script" monitoring-agent "$agent_env" "$agent_action" "$agent_extra"
+            else
+                bash "$deploy_registry_script" monitoring-agent "$agent_env" "$agent_action"
+            fi
+            return 0
+        fi
+
         log_error "Usage: devops monitoring-agent <env> [up|down|restart|status|logs] [profiles_csv|service]"
         exit 1
     fi
 
     log_info "Appel du script: $deploy_registry_script monitoring-agent $*"
     bash "$deploy_registry_script" monitoring-agent "$@"
+}
+
+cmd_monitoring() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local monitoring_script="$DEVOPS_ROOT/scripts/monitoring-manager.sh"
+    if [ ! -f "$monitoring_script" ]; then
+        log_error "Script monitoring-manager.sh introuvable"
+        exit 1
+    fi
+
+    log_info "Appel du script: $monitoring_script $*"
+    bash "$monitoring_script" "$@"
 }
 
 cmd_labels() {
@@ -918,7 +1033,8 @@ cmd_interactive() {
         echo -e "  ${CYAN}5)${NC} ${GREEN}audit${NC}          - Audit de sécurité"
         echo -e "  ${CYAN}6)${NC} ${GREEN}encrypt${NC}        - Chiffrer les fichiers .env (option: --keep-clear)"
         echo -e "  ${CYAN}7)${NC} ${GREEN}labels${NC}         - Standardiser les labels <namespace>.*"
-        echo -e "  ${CYAN}8)${NC} ${GREEN}monitoring-agent${NC} - Déployer/gérer l'agent monitoring"
+        echo -e "  ${CYAN}8)${NC} ${GREEN}monitoring-agent${NC} - Agent monitoring local (serveur courant)"
+        echo -e "  ${CYAN}9)${NC} ${GREEN}monitoring${NC}      - Monitoring multi-serveurs (inventory + déploiement distant)"
         echo ""
         echo -e "  ${CYAN}h)${NC} ${GREEN}help${NC}           - Afficher l'aide complète"
         echo -e "  ${CYAN}0)${NC} ${RED}Quitter${NC}"
@@ -984,21 +1100,30 @@ cmd_interactive() {
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
             8)
-                read -p "Environnement (dev/staging/prod) [prod]: " agent_env
-                agent_env="${agent_env:-prod}"
-                read -p "Action agent (up/down/restart/status/logs) [status]: " agent_action
-                agent_action="${agent_action:-status}"
+                if ! select_env_numbered; then
+                    log_info "Action annulée"
+                    continue
+                fi
+                agent_env="$SELECTED_ENV"
+                if ! select_monitoring_agent_action_numbered; then
+                    log_info "Action annulée"
+                    continue
+                fi
+                agent_action="$SELECTED_AGENT_ACTION"
                 if [ "$agent_action" = "logs" ]; then
-                    read -p "Service logs (vide=tous): " agent_service
+                    read -r -p "Service logs (vide=tous): " agent_service
                     cmd_monitoring_agent "$agent_env" "$agent_action" "$agent_service"
                 elif [ "$agent_action" = "up" ]; then
-                    read -p "Profiles CSV optionnels (ex: airflow,postgres,redis): " agent_profiles
+                    read -r -p "Profiles CSV optionnels (ex: airflow,postgres,redis): " agent_profiles
                     cmd_monitoring_agent "$agent_env" "$agent_action" "$agent_profiles"
                 else
                     cmd_monitoring_agent "$agent_env" "$agent_action"
                 fi
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
+                ;;
+            9)
+                cmd_monitoring
                 ;;
             h|H)
                 cmd_help
@@ -1037,7 +1162,8 @@ cmd_help() {
     echo ""
     echo -e "    ${GREEN}registry <action>${NC}       Gérer le Docker Registry (release/push/pull)"
     echo -e "    ${GREEN}deploy-registry <env>${NC}   Déployer depuis Docker Hub"
-    echo -e "    ${GREEN}monitoring-agent <env>${NC}  Déployer/gérer l'agent monitoring projet"
+    echo -e "    ${GREEN}monitoring-agent <env>${NC}  Déployer/gérer l'agent local (serveur courant)"
+    echo -e "    ${GREEN}monitoring <action>${NC}      Gérer le monitoring multi-serveurs (menu interactif inclus)"
     echo ""
     echo -e "${WHITE}COMMANDES UTILITAIRES:${NC}"
     echo ""
@@ -1055,6 +1181,8 @@ cmd_help() {
     echo -e "    ${CYAN}devops deploy-registry prod${NC}"
     echo -e "    ${CYAN}devops monitoring-agent prod up airflow,postgres,redis${NC}"
     echo -e "    ${CYAN}devops monitoring-agent prod status${NC}"
+    echo -e "    ${CYAN}devops monitoring servers add srv-kafka-1 51.79.8.114 cicbi 22 /home/cicbi/apps/cicbi-kafka-platform${NC}"
+    echo -e "    ${CYAN}devops monitoring agent prod status --all${NC}"
     echo -e "    ${CYAN}devops encrypt --keep-clear${NC}  # Chiffrer sans supprimer les .env clairs"
     echo -e "    ${CYAN}devops labels sync${NC}          # Forcer les labels du namespace configure"
     echo -e "    ${CYAN}devops labels sync --label-prefix orange${NC}"
@@ -1107,6 +1235,9 @@ main() {
             ;;
         monitoring-agent)
             cmd_monitoring_agent "$@"
+            ;;
+        monitoring)
+            cmd_monitoring "$@"
             ;;
         labels)
             cmd_labels "$@"

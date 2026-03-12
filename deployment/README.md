@@ -205,6 +205,43 @@ devops registry profile create dockerhub
 devops registry profile list
 ```
 
+### `devops monitoring <subcommand>`
+Gère les serveurs monitoring (multi-VPS) et pilote l'agent monitoring à distance.
+Sans argument (`devops monitoring`), ouvre un menu interactif complet.
+
+```bash
+# Ouvrir le menu interactif monitoring
+
+devops monitoring
+
+# Lister les serveurs monitoring
+
+devops monitoring servers list
+
+# Ajouter ou mettre à jour un serveur
+
+devops monitoring servers add srvbi-pro-kafka-1 51.79.8.114 cicbi 22 /home/cicbi/apps/cicbi-kafka-platform ~/.ssh/id_rsa
+
+devops monitoring servers set srvbi-pro-kafka-1 51.79.8.114 cicbi 22 /home/cicbi/apps/cicbi-kafka-platform ~/.ssh/id_rsa
+
+# Supprimer un serveur
+
+devops monitoring servers remove srvbi-pro-kafka-1
+
+# Déployer/contrôler l'agent monitoring sur tous les serveurs
+
+devops monitoring agent prod status --all
+
+devops monitoring agent prod up kafka,jmx,node --all
+
+# Générer un inventory Ansible basé sur la liste des serveurs
+
+devops monitoring inventory render
+```
+
+Le fichier des serveurs est géré automatiquement via `monitoring_servers_file`
+(par défaut: `.devops.monitoring-servers.yml`).
+
 ## 🎨 Exemples Complets
 
 ### Exemple 1 : Nouveau projet API
