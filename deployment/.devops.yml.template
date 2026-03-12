@@ -159,30 +159,29 @@ server_ssh_key: ~/.ssh/id_rsa
 # C'est ici que les fichiers seront copiés et où l'application sera exécutée
 server_deploy_path: /home/akiliya/apps
 
+# Fichier d'inventaire des serveurs monitoring (géré automatiquement)
+# Commandes: devops monitoring servers list|add|set|remove
+monitoring_servers_file: .devops.monitoring-servers.yml
+
 # ============================================================================
-# CONFIGURATION MULTI-SERVEURS (optionnel)
+# CONFIGURATION MULTI-SERVEURS MONITORING (optionnel)
 # ============================================================================
 
-# Vous pouvez définir plusieurs serveurs pour différents environnements
-# servers:
-#   dev:
-#     host: dev.example.com
+# Ce bloc est maintenu par le CLI dans le fichier monitoring_servers_file.
+# Exemple de contenu attendu:
+# monitoring_servers:
+#   - name: srvbi-pro-kafka-1
+#     host: 51.79.8.114
 #     port: 22
-#     user: deploy
-#     ssh_key: ~/.ssh/id_rsa_dev
-#     deploy_path: /var/www/app-dev
-#   staging:
-#     host: staging.example.com
+#     user: cicbi
+#     ssh_key: ~/.ssh/id_rsa
+#     deploy_path: /home/cicbi/apps/cicbi-kafka-platform
+#   - name: srvbi-pro-elk
+#     host: 51.79.8.117
 #     port: 22
-#     user: deploy
-#     ssh_key: ~/.ssh/id_rsa_staging
-#     deploy_path: /var/www/app-staging
-#   prod:
-#     host: 45.67.217.48
-#     port: 22
-#     user: akiliya
-#     ssh_key: ~/.ssh/id_rsa_psm_sih
-#     deploy_path: /home/akiliya/apps
+#     user: cicbi
+#     ssh_key: ~/.ssh/id_rsa
+#     deploy_path: /home/cicbi/apps/cicbi-kafka-platform
 
 # ============================================================================
 # CONFIGURATION POSTGRESQL
