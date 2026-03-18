@@ -437,6 +437,23 @@ validate_env() {
     fi
 }
 
+# Définir un nom de projet Compose cohérent pour l'environnement ciblé.
+set_compose_project_name_for_env() {
+    local env=$1
+    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
+    local known_env
+
+    # Éviter l'accumulation des suffixes lors d'actions successives (dev -> prod).
+    for known_env in dev staging prod; do
+        if [[ "$base_compose_name" == *"-${known_env}" ]]; then
+            base_compose_name="${base_compose_name%-${known_env}}"
+            break
+        fi
+    done
+
+    export COMPOSE_PROJECT_NAME="${base_compose_name}-${env}"
+}
+
 # Obtenir le nom du conteneur
 get_container_prefix() {
     local env=$1
@@ -709,6 +726,49 @@ detect_stack_type_for_env() {
 # COMMANDES PRINCIPALES
 # ============================================================================
 
+# Arrêter/supprimer un projet Compose en forçant les restes si nécessaire
+stop_or_remove_project_containers() {
+    local env=$1
+    local mode=${2:-stop}
+
+    case "$mode" in
+        stop)
+            docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" stop 2>/dev/null || true
+            ;;
+        down)
+            docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down --remove-orphans 2>/dev/null || true
+            ;;
+        down-volumes)
+            docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down -v --remove-orphans 2>/dev/null || true
+            ;;
+        *)
+            log_error "Mode d'arrêt invalide: $mode"
+            return 1
+            ;;
+    esac
+
+    local running_ids
+    running_ids=$(docker ps -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")
+    if [ -n "$running_ids" ]; then
+        if [ "$mode" == "stop" ]; then
+            log_warn "Arrêt forcé des conteneurs encore actifs..."
+            docker stop $running_ids >/dev/null 2>&1 || true
+        else
+            log_warn "Suppression forcée des conteneurs encore présents..."
+            docker rm -f $running_ids >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [ "$mode" == "down-volumes" ]; then
+        local volume_ids
+        volume_ids=$(docker volume ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")
+        if [ -n "$volume_ids" ]; then
+            log_warn "Suppression des volumes du projet ${COMPOSE_PROJECT_NAME}..."
+            docker volume rm $volume_ids >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 # Déployer un environnement
 cmd_deploy() {
     local env=$1
@@ -747,12 +807,7 @@ cmd_deploy() {
     fi
 
     log_header "DÉPLOIEMENT - Environnement: $env"
-    local base_compose_name="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME:-$DEFAULT_PROJECT_NAME}}"
-    if [[ "$base_compose_name" == *"-${env}" ]]; then
-        export COMPOSE_PROJECT_NAME="$base_compose_name"
-    else
-        export COMPOSE_PROJECT_NAME="${base_compose_name}-${env}"
-    fi
+    set_compose_project_name_for_env "$env"
 
     # Confirmation pour la production
     if [ "$env" == "prod" ]; then
@@ -965,6 +1020,7 @@ cmd_deploy() {
 cmd_start() {
     local env=$1
     validate_env "$env"
+    set_compose_project_name_for_env "$env"
 
     log_header "DÉMARRAGE - Environnement: $env"
     docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" up -d
@@ -975,15 +1031,65 @@ cmd_start() {
 # Arrêter les conteneurs
 cmd_stop() {
     local env=$1
+    local mode=${2:-stop}
     validate_env "$env"
+    set_compose_project_name_for_env "$env"
+
+    if [ "$mode" == "ask" ]; then
+        local remove_containers
+        local remove_volumes
+
+        read -p "Supprimer aussi les conteneurs (docker down) ? (y/n): " remove_containers
+        if [ "$remove_containers" == "y" ] || [ "$remove_containers" == "Y" ]; then
+            read -p "Supprimer aussi les volumes (ATTENTION: perte de données) ? (y/n): " remove_volumes
+            if [ "$remove_volumes" == "y" ] || [ "$remove_volumes" == "Y" ]; then
+                mode="down-volumes"
+            else
+                mode="down"
+            fi
+        else
+            mode="stop"
+        fi
+    fi
 
     if [ "$env" == "prod" ]; then
-        confirm_action "Arrêter l'environnement de PRODUCTION ?" "$env"
+        case "$mode" in
+            down-volumes)
+                confirm_action "Arrêter et SUPPRIMER conteneurs + volumes de PRODUCTION ?" "$env"
+                ;;
+            down)
+                confirm_action "Arrêter et SUPPRIMER les conteneurs de PRODUCTION ?" "$env"
+                ;;
+            *)
+                confirm_action "Arrêter l'environnement de PRODUCTION ?" "$env"
+                ;;
+        esac
     fi
 
     log_header "ARRÊT - Environnement: $env"
-    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" stop
-    log_success "Conteneurs arrêtés"
+    log_info "Projet Compose ciblé: ${COMPOSE_PROJECT_NAME}"
+
+    case "$mode" in
+        down-volumes)
+            log_warn "Mode: suppression des conteneurs, réseaux et volumes"
+            ;;
+        down)
+            log_info "Mode: suppression des conteneurs et réseaux"
+            ;;
+        *)
+            log_info "Mode: arrêt simple (conteneurs conservés)"
+            ;;
+    esac
+
+    stop_or_remove_project_containers "$env" "$mode"
+
+    local still_running
+    still_running=$(docker ps --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" --format '{{.Names}}')
+    if [ -n "$still_running" ]; then
+        log_warn "Des conteneurs sont encore actifs: $(echo "$still_running" | tr '\n' ' ')"
+    else
+        log_success "Conteneurs arrêtés"
+    fi
 }
 
 # Redémarrer les conteneurs
@@ -991,6 +1097,7 @@ cmd_restart() {
     local env=$1
     local service=$2
     validate_env "$env"
+    set_compose_project_name_for_env "$env"
 
     log_header "REDÉMARRAGE - Environnement: $env"
 
@@ -1046,6 +1153,7 @@ cmd_status() {
         docker ps --filter "name=${PROJECT_NAME}-nginx-proxy" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
     else
         validate_env "$env"
+        set_compose_project_name_for_env "$env"
         log_header "STATUT - Environnement: $env"
     docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" ps
     fi
@@ -1369,6 +1477,7 @@ cmd_restore() {
     local backup_file=$2
 
     validate_env "$env"
+    set_compose_project_name_for_env "$env"
 
     if [ ! -f "$backup_file" ]; then
         log_error "Fichier de backup introuvable: $backup_file"
@@ -1733,7 +1842,7 @@ PY
             ;;
         9)
             read -p "Environnement (dev/prod): " env
-            cmd_stop "$env"
+            cmd_stop "$env" "ask"
             ;;
         10)
             read -p "Environnement (dev/prod): " env
@@ -1876,7 +1985,10 @@ show_help() {
     echo ""
     echo -e "${WHITE}Gestion des conteneurs:${NC}"
     echo "    start <env>                    Démarrer les conteneurs"
-    echo "    stop <env>                     Arrêter les conteneurs"
+    echo "    stop <env> [options]           Arrêter les conteneurs"
+    echo "        --remove, --down           Supprimer aussi les conteneurs/réseaux"
+    echo "        --remove-volumes, -v       Supprimer aussi les volumes"
+    echo "        --ask                      Demander le mode de suppression"
     echo "    restart <env> [service]        Redémarrer les conteneurs ou un service"
     echo "    status [env]                   Afficher le statut (env: dev/prod/all)"
     echo "    stats                          Statistiques en temps réel"
@@ -2031,7 +2143,29 @@ main() {
             cmd_start "${1:-}"
             ;;
         stop)
-            cmd_stop "${1:-}"
+            ENV=${1:-""}
+            STOP_MODE="stop"
+            shift 2>/dev/null || true
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --remove|--down)
+                        STOP_MODE="down"
+                        ;;
+                    --remove-volumes|-v)
+                        STOP_MODE="down-volumes"
+                        ;;
+                    --ask)
+                        STOP_MODE="ask"
+                        ;;
+                    *)
+                        log_error "Option invalide pour stop: $1"
+                        echo "Usage: ./deploy.sh stop <env> [--remove|--down] [--remove-volumes|-v] [--ask]"
+                        exit 1
+                        ;;
+                esac
+                shift
+            done
+            cmd_stop "$ENV" "$STOP_MODE"
             ;;
         restart)
             cmd_restart "${1:-}" "${2:-}"
