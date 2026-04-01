@@ -778,6 +778,7 @@ cmd_deploy() {
     local registry_version=${5:-latest}
     local custom_branch=${6:-}
     local use_local=${7:-false}
+    local use_reload=${8:-auto}
 
     validate_env "$env"
     load_env "$env"
@@ -809,6 +810,35 @@ cmd_deploy() {
     log_header "DÉPLOIEMENT - Environnement: $env"
     set_compose_project_name_for_env "$env"
 
+    # DEV: choix du mode hot-reload (sans redéploiement à chaque changement)
+    if [ "$env" == "dev" ]; then
+        local resolved_reload="$use_reload"
+
+        if [ "$resolved_reload" == "auto" ]; then
+            if [ "$use_local" == "true" ] && [ -t 0 ]; then
+                read -p "Activer le mode hot-reload FastAPI en DEV ? (Y/n): " reload_choice
+                case "$reload_choice" in
+                    n|N|no|NO)
+                        resolved_reload="false"
+                        ;;
+                    *)
+                        resolved_reload="true"
+                        ;;
+                esac
+            else
+                # Valeur par défaut pour les usages non-interactifs
+                resolved_reload="true"
+            fi
+        fi
+
+        if [ "$resolved_reload" != "true" ] && [ "$resolved_reload" != "false" ]; then
+            log_error "Valeur invalide pour le mode reload: $resolved_reload (attendu: true/false/auto)"
+            exit 1
+        fi
+
+        export FASTAPI_HOT_RELOAD="$resolved_reload"
+    fi
+
     # Confirmation pour la production
     if [ "$env" == "prod" ]; then
         confirm_action "Vous êtes sur le point de déployer en PRODUCTION" "$env"
@@ -820,6 +850,11 @@ cmd_deploy() {
         log_warn "📁 Déploiement depuis les fichiers locaux actuels"
         log_info "Répertoire: $(pwd)"
         log_info "Branche Git actuelle: $(git branch --show-current 2>/dev/null || echo 'inconnue')"
+        if [ "$env" == "dev" ] && [ "${FASTAPI_HOT_RELOAD:-true}" == "true" ]; then
+            log_info "Mode hot-reload DEV actif: changements rechargés automatiquement sans redéploiement"
+        elif [ "$env" == "dev" ]; then
+            log_warn "Mode hot-reload DEV désactivé: un restart/redeploy sera nécessaire après changement de code"
+        fi
 
         log_info "Construction de l'image depuis les fichiers locaux..."
         run_compose_build "$env" "$no_cache" "$(pwd)"
@@ -1590,7 +1625,7 @@ show_interactive_menu() {
     echo ""
 
     echo -e "${WHITE}Gestion des environnements:${NC}"
-    echo "  1) Déployer DEV (fichiers locaux)"
+    echo "  1) Déployer DEV (fichiers locaux + hot-reload)"
     echo "  2) Déployer DEV (clone temporaire)"
     echo "  3) Déployer DEV (clone Git dans Docker)"
     echo "  4) Déployer PROD (clone temporaire)"
@@ -1628,7 +1663,7 @@ show_interactive_menu() {
         1)
             # Déployer DEV (fichiers locaux)
             log_info "Déploiement DEV depuis les fichiers locaux..."
-            log_warn "⚠️  Les fichiers du répertoire actuel seront utilisés"
+            log_warn "⚠️  Les fichiers du répertoire actuel seront utilisés (hot-reload automatique ensuite)"
             cmd_deploy "dev" false false false "latest" "" true
             ;;
         2)
@@ -1977,8 +2012,10 @@ show_help() {
     echo -e "${WHITE}Déploiement:${NC}"
     echo "    deploy <env>                   Déployer un environnement (dev/prod)"
     echo "        --no-cache                 Construire sans cache"
-    echo "        --use-local                Build depuis fichiers locaux (sans clone)"
+    echo "        --use-local                Build depuis fichiers locaux (sans clone, hot-reload en dev)"
     echo "        --use-git                  Clone depuis Git dans le build"
+    echo "        --reload                   Forcer le hot-reload en dev"
+    echo "        --no-reload                Désactiver le hot-reload en dev"
     echo "        --from-registry [version]  Pull depuis le registry Docker"
     echo "        --branch <branch>          Déployer une branche spécifique"
     echo "        (Par défaut: clone temporaire de la branche depuis .env)"
@@ -2014,7 +2051,7 @@ show_help() {
     echo "        Actions: start, stop, restart, reload, test, logs"
     echo ""
     echo -e "${CYAN}EXEMPLES:${NC}"
-    echo "    # Déploiement depuis fichiers locaux (rapide pour le dev)"
+    echo "    # Déploiement depuis fichiers locaux (rapide pour le dev + hot-reload)"
     echo "    ./deploy.sh deploy dev --use-local"
     echo ""
     echo "    # Déploiement avec clone temporaire (par défaut, branche du .env)"
@@ -2044,9 +2081,10 @@ show_help() {
     echo -e "${CYAN}WORKFLOWS RECOMMANDÉS:${NC}"
     echo ""
     echo -e "    ${WHITE}1. Développement rapide (fichiers locaux - NOUVEAU!):${NC}"
-    echo "       # Tester rapidement vos modifications locales sans commit"
-    echo "       # Utilise directement les fichiers du répertoire actuel"
+    echo "       # Un seul deploy, puis modifications locales rechargees automatiquement"
+    echo "       # Les changements de code FastAPI ne necessitent plus de redeploiement"
     echo "       ./deploy.sh deploy dev --use-local"
+    echo "       ./deploy.sh logs dev -f"
     echo ""
     echo -e "    ${WHITE}2. Développement (clone temporaire):${NC}"
     echo "       # Reste sur votre branche actuelle (ex: feature/CICBI-05)"
@@ -2096,7 +2134,7 @@ main() {
             ENV=${1:-""}
             if [ -z "$ENV" ]; then
                 log_error "Environnement requis"
-                echo "Usage: ./deploy.sh deploy <dev|prod> [--no-cache] [--use-local] [--use-git] [--from-registry [version]] [--branch <branch>]"
+                echo "Usage: ./deploy.sh deploy <dev|prod> [--no-cache] [--use-local] [--use-git] [--reload|--no-reload] [--from-registry [version]] [--branch <branch>]"
                 exit 1
             fi
             NO_CACHE=false
@@ -2105,6 +2143,7 @@ main() {
             REGISTRY_VERSION="latest"
             CUSTOM_BRANCH=""
             USE_LOCAL=false
+            RELOAD_MODE="auto"
             shift
             while [ $# -gt 0 ]; do
                 case "$1" in
@@ -2116,6 +2155,12 @@ main() {
                         ;;
                     --use-git)
                         USE_GIT=true
+                        ;;
+                    --reload)
+                        RELOAD_MODE="true"
+                        ;;
+                    --no-reload)
+                        RELOAD_MODE="false"
                         ;;
                     --from-registry)
                         FROM_REGISTRY=true
@@ -2137,7 +2182,7 @@ main() {
                 esac
                 shift
             done
-            cmd_deploy "$ENV" "$NO_CACHE" "$USE_GIT" "$FROM_REGISTRY" "$REGISTRY_VERSION" "$CUSTOM_BRANCH" "$USE_LOCAL"
+            cmd_deploy "$ENV" "$NO_CACHE" "$USE_GIT" "$FROM_REGISTRY" "$REGISTRY_VERSION" "$CUSTOM_BRANCH" "$USE_LOCAL" "$RELOAD_MODE"
             ;;
         start)
             cmd_start "${1:-}"
