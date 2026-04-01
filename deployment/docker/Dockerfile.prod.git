@@ -127,5 +127,5 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s \
     CMD curl -f http://localhost:80/health || exit 1
 
-# Production : 4 workers
-CMD uvicorn ${APP_ENTRYPOINT} --host 0.0.0.0 --port 80 --workers 4
+# Production : 4 workers (forme JSON pour une meilleure gestion des signaux)
+CMD ["sh", "-c", "exec uvicorn ${APP_ENTRYPOINT} --host 0.0.0.0 --port 80 --workers 4"]

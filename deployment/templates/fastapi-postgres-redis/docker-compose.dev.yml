@@ -5,10 +5,16 @@ services:
   api:
     ports:
       - "${DEV_PORT:-8001}:80"
+    volumes:
+      # Hot-reload: monte le code local dans le conteneur
+      - "../${APP_SOURCE_DIR:-app}:${WORKDIR:-/app}/${APP_DEST_DIR:-app}:rw"
     environment:
       - ENVIRONMENT=dev
       - LOG_LEVEL=DEBUG
       - RELOAD=true
+      - FASTAPI_HOT_RELOAD=${FASTAPI_HOT_RELOAD:-true}
+      # Requis surtout sur Docker Desktop (macOS/Windows) pour détecter les changements de fichiers montés
+      - WATCHFILES_FORCE_POLLING=${WATCHFILES_FORCE_POLLING:-true}
     labels:
       - "project=${PROJECT_NAME}"
       - "environment=dev"
@@ -16,7 +22,12 @@ services:
       - "cic.project=${PROJECT_NAME}"
       - "cic.env=dev"
       - "cic.service=api"
-    command: uvicorn main:app --host 0.0.0.0 --port 80 --reload
+    command: >
+      sh -c "if [ \"${FASTAPI_HOT_RELOAD:-true}\" = \"true\" ]; then
+        exec uvicorn ${APP_ENTRYPOINT:-main:app} --host 0.0.0.0 --port 80 --reload --reload-dir ${WORKDIR:-/app}/${APP_DEST_DIR:-app};
+      else
+        exec uvicorn ${APP_ENTRYPOINT:-main:app} --host 0.0.0.0 --port 80;
+      fi"
 
   postgres:
     ports:
