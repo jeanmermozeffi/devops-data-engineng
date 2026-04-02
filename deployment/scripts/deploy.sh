@@ -779,6 +779,7 @@ cmd_deploy() {
     local custom_branch=${6:-}
     local use_local=${7:-false}
     local use_reload=${8:-auto}
+    local supports_fastapi_reload=false
 
     validate_env "$env"
     load_env "$env"
@@ -810,33 +811,49 @@ cmd_deploy() {
     log_header "DÉPLOIEMENT - Environnement: $env"
     set_compose_project_name_for_env "$env"
 
-    # DEV: choix du mode hot-reload (sans redéploiement à chaque changement)
+    # DEV: activer le hot-reload uniquement pour les stacks FastAPI
     if [ "$env" == "dev" ]; then
-        local resolved_reload="$use_reload"
+        local services_list
+        services_list="$(get_compose_services "$env" "$(pwd)" 2>/dev/null | tr '\n' ' ')"
+        if echo "$services_list" | grep -Eq '(^| )api( |$)'; then
+            supports_fastapi_reload=true
+        elif [[ "${STACK_TYPE:-}" == fastapi-* ]]; then
+            supports_fastapi_reload=true
+        fi
 
-        if [ "$resolved_reload" == "auto" ]; then
-            if [ "$use_local" == "true" ] && [ -t 0 ]; then
-                read -p "Activer le mode hot-reload FastAPI en DEV ? (Y/n): " reload_choice
-                case "$reload_choice" in
-                    n|N|no|NO)
-                        resolved_reload="false"
-                        ;;
-                    *)
-                        resolved_reload="true"
-                        ;;
-                esac
-            else
-                # Valeur par défaut pour les usages non-interactifs
-                resolved_reload="true"
+        if [ "$supports_fastapi_reload" == "true" ]; then
+            local resolved_reload="$use_reload"
+
+            if [ "$resolved_reload" == "auto" ]; then
+                if [ "$use_local" == "true" ] && [ -t 0 ]; then
+                    read -p "Activer le mode hot-reload FastAPI en DEV ? (Y/n): " reload_choice
+                    case "$reload_choice" in
+                        n|N|no|NO)
+                            resolved_reload="false"
+                            ;;
+                        *)
+                            resolved_reload="true"
+                            ;;
+                    esac
+                else
+                    # Valeur par défaut pour les usages non-interactifs
+                    resolved_reload="true"
+                fi
             fi
-        fi
 
-        if [ "$resolved_reload" != "true" ] && [ "$resolved_reload" != "false" ]; then
-            log_error "Valeur invalide pour le mode reload: $resolved_reload (attendu: true/false/auto)"
-            exit 1
-        fi
+            if [ "$resolved_reload" != "true" ] && [ "$resolved_reload" != "false" ]; then
+                log_error "Valeur invalide pour le mode reload: $resolved_reload (attendu: true/false/auto)"
+                exit 1
+            fi
 
-        export FASTAPI_HOT_RELOAD="$resolved_reload"
+            export FASTAPI_HOT_RELOAD="$resolved_reload"
+        else
+            # Stack non-FastAPI: ne pas poser la question, ignorer les flags reload
+            if [ "$use_reload" != "auto" ]; then
+                log_warn "Option --reload/--no-reload ignorée: stack non-FastAPI détectée en DEV"
+            fi
+            unset FASTAPI_HOT_RELOAD
+        fi
     fi
 
     # Confirmation pour la production
@@ -850,9 +867,9 @@ cmd_deploy() {
         log_warn "📁 Déploiement depuis les fichiers locaux actuels"
         log_info "Répertoire: $(pwd)"
         log_info "Branche Git actuelle: $(git branch --show-current 2>/dev/null || echo 'inconnue')"
-        if [ "$env" == "dev" ] && [ "${FASTAPI_HOT_RELOAD:-true}" == "true" ]; then
+        if [ "$env" == "dev" ] && [ "$supports_fastapi_reload" == "true" ] && [ "${FASTAPI_HOT_RELOAD:-true}" == "true" ]; then
             log_info "Mode hot-reload DEV actif: changements rechargés automatiquement sans redéploiement"
-        elif [ "$env" == "dev" ]; then
+        elif [ "$env" == "dev" ] && [ "$supports_fastapi_reload" == "true" ]; then
             log_warn "Mode hot-reload DEV désactivé: un restart/redeploy sera nécessaire après changement de code"
         fi
 
@@ -2014,8 +2031,8 @@ show_help() {
     echo "        --no-cache                 Construire sans cache"
     echo "        --use-local                Build depuis fichiers locaux (sans clone, hot-reload en dev)"
     echo "        --use-git                  Clone depuis Git dans le build"
-    echo "        --reload                   Forcer le hot-reload en dev"
-    echo "        --no-reload                Désactiver le hot-reload en dev"
+    echo "        --reload                   Forcer le hot-reload en dev (stack FastAPI uniquement)"
+    echo "        --no-reload                Désactiver le hot-reload en dev (stack FastAPI uniquement)"
     echo "        --from-registry [version]  Pull depuis le registry Docker"
     echo "        --branch <branch>          Déployer une branche spécifique"
     echo "        (Par défaut: clone temporaire de la branche depuis .env)"
