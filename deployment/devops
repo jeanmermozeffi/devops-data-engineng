@@ -971,6 +971,20 @@ cmd_monitoring_agent() {
     bash "$deploy_registry_script" monitoring-agent "$@"
 }
 
+cmd_build_exporters() {
+    load_project_config
+    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+
+    local build_script="$DEVOPS_ROOT/scripts/build-exporters.sh"
+    if [ ! -f "$build_script" ]; then
+        log_error "Script build-exporters.sh introuvable: $build_script"
+        exit 1
+    fi
+
+    log_info "Appel du script: $build_script $*"
+    bash "$build_script" "$@"
+}
+
 cmd_monitoring() {
     load_project_config
     export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
@@ -1035,6 +1049,7 @@ cmd_interactive() {
         echo -e "  ${CYAN}7)${NC} ${GREEN}labels${NC}         - Standardiser les labels <namespace>.*"
         echo -e "  ${CYAN}8)${NC} ${GREEN}monitoring-agent${NC} - Agent monitoring local (serveur courant)"
         echo -e "  ${CYAN}9)${NC} ${GREEN}monitoring${NC}      - Monitoring multi-serveurs (inventory + déploiement distant)"
+        echo -e "  ${CYAN}10)${NC} ${GREEN}build-exporters${NC} - Builder/pousser les images custom (stack monitoring)"
         echo ""
         echo -e "  ${CYAN}h)${NC} ${GREEN}help${NC}           - Afficher l'aide complète"
         echo -e "  ${CYAN}0)${NC} ${RED}Quitter${NC}"
@@ -1125,6 +1140,18 @@ cmd_interactive() {
             9)
                 cmd_monitoring
                 ;;
+            10)
+                # build-exporters: mode interactif (pas d'argument = menu intégré)
+                local build_exporters_script="$DEVOPS_ROOT/scripts/build-exporters.sh"
+                if [ -f "$build_exporters_script" ]; then
+                    export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+                    bash "$build_exporters_script"
+                else
+                    log_error "Script build-exporters.sh introuvable"
+                fi
+                echo ""
+                read -p "Appuyez sur Entrée pour continuer..."
+                ;;
             h|H)
                 cmd_help
                 echo ""
@@ -1160,8 +1187,9 @@ cmd_help() {
     echo ""
     echo -e "${WHITE}COMMANDES REGISTRY:${NC}"
     echo ""
-    echo -e "    ${GREEN}registry <action>${NC}       Gérer le Docker Registry (release/push/pull)"
+    echo -e "    ${GREEN}registry <action>${NC}        Gérer le Docker Registry (release/push/pull)"
     echo -e "    ${GREEN}deploy-registry <env>${NC}   Déployer depuis Docker Hub"
+    echo -e "    ${GREEN}build-exporters [env]${NC}   Builder/pousser les images custom (stack monitoring)"
     echo -e "    ${GREEN}monitoring-agent <env>${NC}  Déployer/gérer l'agent local (serveur courant)"
     echo -e "    ${GREEN}monitoring <action>${NC}      Gérer le monitoring multi-serveurs (menu interactif inclus)"
     echo ""
@@ -1179,6 +1207,11 @@ cmd_help() {
     echo -e "    ${CYAN}devops package${NC}               # Créer un package"
     echo -e "    ${CYAN}devops registry release prod v1.0.0${NC}"
     echo -e "    ${CYAN}devops deploy-registry prod${NC}"
+    echo -e "    ${CYAN}devops build-exporters dev${NC}                                        # Builder tous les exporters actifs"
+    echo -e "    ${CYAN}devops build-exporters dev --service debezium-exporter${NC}            # Un seul service"
+    echo -e "    ${CYAN}devops build-exporters dev --all --no-cache --parallel${NC}            # Tout en parallèle, sans cache"
+    echo -e "    ${CYAN}devops build-exporters dev --version v1.2.3${NC}                       # Tag de version spécifique"
+    echo -e "    ${CYAN}devops build-exporters prod --version v2.0.0 --description 'Release'${NC} # Avec description"
     echo -e "    ${CYAN}devops monitoring-agent prod up airflow,postgres,redis${NC}"
     echo -e "    ${CYAN}devops monitoring-agent prod status${NC}"
     echo -e "    ${CYAN}devops monitoring servers add srv-kafka-1 51.79.8.114 cicbi 22 /home/cicbi/apps/cicbi-kafka-platform${NC}"
@@ -1238,6 +1271,9 @@ main() {
             ;;
         monitoring)
             cmd_monitoring "$@"
+            ;;
+        build-exporters)
+            cmd_build_exporters "$@"
             ;;
         labels)
             cmd_labels "$@"
