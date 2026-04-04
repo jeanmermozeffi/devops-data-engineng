@@ -211,7 +211,9 @@ resolve_monitoring_dir_for_package() {
         candidates+=("${DEVOPS_MONITORING_SOURCE}")
     fi
     candidates+=("$SCRIPT_DIR/../monitoring")
-    candidates+=("/Users/jeanmermozeffi/PycharmProjects/cicbi-monitoring-platform/deployment/monitoring")
+    # Chemins communs selon l'OS (Linux / macOS)
+    candidates+=("$HOME/PycharmProjects/cicbi-monitoring-platform/deployment/monitoring")
+    candidates+=("/home/jeeff/PycharmProjects/cicbi-monitoring-platform/deployment/monitoring")
 
     for candidate in "${candidates[@]}"; do
         if [ -d "$candidate" ]; then
@@ -687,43 +689,43 @@ create_package() {
         log_info "Outils Superset non inclus (imports via CI/CD uniquement)"
     fi
 
-    # Inclure le compose RH (base de donnees test) dans un dossier dedie
-    # Cherche d'abord dans PROJECT_DIR, puis dans SUPSERSET_PROJECT_DIR si defini
-    RH_SOURCE_DIRS=("$PROJECT_DIR")
-    if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
-        RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
-    fi
-
-    RH_COMPOSE_SRC=""
-    for d in "${RH_SOURCE_DIRS[@]}"; do
-        if [ -f "$d/docker-compose.rh.yml" ]; then
-            RH_COMPOSE_SRC="$d/docker-compose.rh.yml"
-            break
-        fi
-    done
-
-    if [ -n "$RH_COMPOSE_SRC" ]; then
-        mkdir -p "$PACKAGE_DIR/docker"
-        cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker/"
-        log_success "✓ docker/docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
-
-        # Copier les scripts SQL RH requis par docker-compose.rh.yml
-        RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
-        if [ ! -d "$RH_SQL_SRC_DIR" ]; then
-            RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/database-rh/initdb"
+    # Inclure le compose RH (base de donnees test) — non applicable pour le stack monitoring
+    if [ "${STACK_TYPE}" != "monitoring" ]; then
+        RH_SOURCE_DIRS=("$PROJECT_DIR")
+        if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
+            RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
         fi
 
-        if [ -d "$RH_SQL_SRC_DIR" ] && ls "$RH_SQL_SRC_DIR"/*.sql >/dev/null 2>&1; then
-            mkdir -p "$PACKAGE_DIR/docker/database-rh/initdb"
-            cp "$RH_SQL_SRC_DIR"/*.sql "$PACKAGE_DIR/docker/database-rh/initdb/"
-            RH_SQL_COUNT=$(ls -1 "$PACKAGE_DIR/docker/database-rh/initdb/"*.sql 2>/dev/null | wc -l | tr -d ' ')
-            log_success "✓ Scripts SQL RH copiés: $RH_SQL_COUNT fichier(s)"
+        RH_COMPOSE_SRC=""
+        for d in "${RH_SOURCE_DIRS[@]}"; do
+            if [ -f "$d/docker-compose.rh.yml" ]; then
+                RH_COMPOSE_SRC="$d/docker-compose.rh.yml"
+                break
+            fi
+        done
+
+        if [ -n "$RH_COMPOSE_SRC" ]; then
+            mkdir -p "$PACKAGE_DIR/docker"
+            cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker/"
+            log_success "✓ docker/docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
+
+            RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
+            if [ ! -d "$RH_SQL_SRC_DIR" ]; then
+                RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/database-rh/initdb"
+            fi
+
+            if [ -d "$RH_SQL_SRC_DIR" ] && ls "$RH_SQL_SRC_DIR"/*.sql >/dev/null 2>&1; then
+                mkdir -p "$PACKAGE_DIR/docker/database-rh/initdb"
+                cp "$RH_SQL_SRC_DIR"/*.sql "$PACKAGE_DIR/docker/database-rh/initdb/"
+                RH_SQL_COUNT=$(ls -1 "$PACKAGE_DIR/docker/database-rh/initdb/"*.sql 2>/dev/null | wc -l | tr -d ' ')
+                log_success "✓ Scripts SQL RH copiés: $RH_SQL_COUNT fichier(s)"
+            else
+                log_error "❌ Scripts SQL RH introuvables (attendu dans docker/database-rh/initdb ou database-rh/initdb)"
+                exit 1
+            fi
         else
-            log_error "❌ Scripts SQL RH introuvables (attendu dans docker/database-rh/initdb ou database-rh/initdb)"
-            exit 1
+            log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
         fi
-    else
-        log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
     fi
 
     # Copier Makefile si present (utile pour outils/venv locaux)
@@ -752,6 +754,7 @@ create_package() {
 REGISTRY_TYPE=${REGISTRY_TYPE}
 REGISTRY_URL=${REGISTRY_URL}
 REGISTRY_USERNAME=${REGISTRY_USERNAME}
+REGISTRY_TOKEN=${REGISTRY_TOKEN:-}
 IMAGE_NAME=${IMAGE_NAME}
 
 # Configuration projet (depuis .devops.yml)
@@ -768,6 +771,32 @@ APP_DEST_DIR=${APP_DEST_DIR}
 WORKDIR=${WORKDIR:-/app}
 EOF
 
+    # Pour le stack monitoring : ajouter la liste des images custom dans .env.registry
+    if [ "${STACK_TYPE}" = "monitoring" ] && grep -q "^custom_images:" "${PROJECT_DIR}/.devops.yml" 2>/dev/null; then
+        log_info "Stack monitoring: ajout des custom_images dans .env.registry..."
+        {
+            echo ""
+            echo "# Images custom du stack monitoring"
+            echo "# Format: CUSTOM_IMAGE_<SERVICE>=<image_name>"
+            awk '
+            /^custom_images:/ { in_block=1; next }
+            in_block && /^[a-zA-Z_]/ { in_block=0 }
+            !in_block { next }
+            /^[[:space:]]*-[[:space:]]+service:/ {
+                gsub(/.*service:[[:space:]]*/, ""); gsub(/[[:space:]]*$/, "")
+                gsub(/^["'"'"']|["'"'"']$/, ""); service=$0; image=""
+            }
+            /^[[:space:]]+image_name:/ {
+                gsub(/.*image_name:[[:space:]]*/, ""); gsub(/[[:space:]]*$/, "")
+                gsub(/^["'"'"']|["'"'"']$/, ""); image=$0
+                key=service; gsub(/-/, "_", key); gsub(/[^a-zA-Z0-9_]/, "", key)
+                printf "CUSTOM_IMAGE_%s=%s\n", toupper(key), image
+            }
+            ' "${PROJECT_DIR}/.devops.yml"
+        } >> "$PACKAGE_DIR/.env.registry"
+        log_success "✓ custom_images ajoutés dans .env.registry"
+    fi
+
     log_info "🔐 Les .env seront automatiquement chiffrés sur le serveur après installation"
 
     # Fonction locale pour créer des profils de base
@@ -777,7 +806,7 @@ EOF
 REGISTRY_TYPE=${REGISTRY_TYPE}
 REGISTRY_URL=${REGISTRY_URL}
 REGISTRY_USERNAME=${REGISTRY_USERNAME}
-REGISTRY_TOKEN=
+REGISTRY_TOKEN=${REGISTRY_TOKEN:-}
 REGISTRY_PASSWORD=
 IMAGE_NAME=${IMAGE_NAME}
 GIT_REPO=
@@ -792,7 +821,7 @@ EOFPROFILE
 REGISTRY_TYPE=${REGISTRY_TYPE}
 REGISTRY_URL=${REGISTRY_URL}
 REGISTRY_USERNAME=${REGISTRY_USERNAME}
-REGISTRY_TOKEN=
+REGISTRY_TOKEN=${REGISTRY_TOKEN:-}
 REGISTRY_PASSWORD=
 IMAGE_NAME=${IMAGE_NAME}
 GIT_REPO=
@@ -807,7 +836,7 @@ EOFPROFILE
 REGISTRY_TYPE=${REGISTRY_TYPE}
 REGISTRY_URL=${REGISTRY_URL}
 REGISTRY_USERNAME=${REGISTRY_USERNAME}
-REGISTRY_TOKEN=
+REGISTRY_TOKEN=${REGISTRY_TOKEN:-}
 REGISTRY_PASSWORD=
 IMAGE_NAME=${IMAGE_NAME}
 GIT_REPO=
@@ -817,8 +846,12 @@ STAGING_BRANCH=staging
 PROD_BRANCH=prod
 EOFPROFILE
 
-        log_success "✓ Profils de base créés dans scripts/.registry-profiles/"
-        log_warn "⚠️  N'oubliez pas de compléter les tokens sur le serveur!"
+        if [ -n "${REGISTRY_TOKEN:-}" ]; then
+            log_success "✓ Profils de base créés dans scripts/.registry-profiles/ (token inclus depuis .devops.yml)"
+        else
+            log_success "✓ Profils de base créés dans scripts/.registry-profiles/"
+            log_warn "⚠️  N'oubliez pas de compléter les tokens sur le serveur!"
+        fi
     }
 
     # Copier les profils registry existants
