@@ -75,6 +75,9 @@ fi
 # ============================================================================
 REGISTRY_USERNAME="${REGISTRY_USERNAME:-$(grep "^registry_username:" "$DEVOPS_YML" | head -1 | awk '{print $2}' | tr -d '"'"'")}"
 REGISTRY_TOKEN="${REGISTRY_TOKEN:-$(grep "^registry_token:" "$DEVOPS_YML" | head -1 | awk '{print $2}' | tr -d '"'"'")}"
+REGISTRY_PASSWORD="${REGISTRY_PASSWORD:-$(grep "^registry_password:" "$DEVOPS_YML" | head -1 | awk '{print $2}' | tr -d '"'"'")}"
+REGISTRY_URL="${REGISTRY_URL:-$(grep "^registry_url:" "$DEVOPS_YML" | head -1 | awk '{print $2}' | tr -d '"'"'")}"
+REGISTRY_URL="${REGISTRY_URL:-docker.io}"
 
 if [ -z "$REGISTRY_USERNAME" ]; then
     log_error "registry_username non défini dans .devops.yml"
@@ -227,15 +230,21 @@ get_dockerhub_jwt() {
 
     [ -z "$pat" ] && return 0
 
-    local resp
+    local resp curl_rc
     resp=$(curl -s -w "\n%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d "{\"username\":\"${username}\",\"password\":\"${pat}\"}" \
         "https://hub.docker.com/v2/users/login")
+    curl_rc=$?
+
+    if [ "$curl_rc" -ne 0 ]; then
+        log_warn "  Impossible d'obtenir le JWT Docker Hub (erreur réseau/curl) — création de repo désactivée"
+        return 0
+    fi
 
     local code body
-    code=$(echo "$resp" | tail -1)
-    body=$(echo "$resp" | head -n -1)
+    code=$(printf '%s\n' "$resp" | tail -n 1)
+    body=$(printf '%s\n' "$resp" | sed '$d')
 
     if [ "$code" = "200" ]; then
         DOCKERHUB_JWT=$(echo "$body" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
@@ -280,6 +289,10 @@ ensure_dockerhub_repo_exists() {
     else
         log_warn "  Impossible de créer le repo via API (code $create_code) — le push tentera quand même"
     fi
+}
+
+is_registry_logged_in() {
+    docker info 2>/dev/null | grep -q "Username: ${REGISTRY_USERNAME}"
 }
 
 # ============================================================================
@@ -549,13 +562,35 @@ fi
 # ============================================================================
 # Login Docker Hub
 # ============================================================================
-if ! $DRY_RUN && [ -n "$REGISTRY_TOKEN" ]; then
-    log_info "Login Docker Hub ($REGISTRY_USERNAME)..."
-    echo "$REGISTRY_TOKEN" | docker login -u "$REGISTRY_USERNAME" --password-stdin
-    log_success "Authentifié sur Docker Hub"
-    log_info "Obtention du JWT Docker Hub pour l'API..."
-    get_dockerhub_jwt "$REGISTRY_USERNAME" "$REGISTRY_TOKEN"
-    [ -n "$DOCKERHUB_JWT" ] && log_success "JWT Docker Hub obtenu" || true
+if ! $DRY_RUN; then
+    if is_registry_logged_in; then
+        log_success "Session Docker déjà authentifiée pour '$REGISTRY_USERNAME' (login ignoré)"
+    else
+        log_info "Login Docker Hub ($REGISTRY_USERNAME)..."
+
+        local_auth_secret=""
+        if [ -n "$REGISTRY_TOKEN" ]; then
+            local_auth_secret="$REGISTRY_TOKEN"
+            if ! printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY_URL" -u "$REGISTRY_USERNAME" --password-stdin; then
+                log_error "Échec de l'authentification Docker Hub pour l'utilisateur '$REGISTRY_USERNAME'. Vérifiez registry_username/registry_token."
+                exit 1
+            fi
+        elif [ -n "$REGISTRY_PASSWORD" ]; then
+            local_auth_secret="$REGISTRY_PASSWORD"
+            if ! printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_URL" -u "$REGISTRY_USERNAME" --password-stdin; then
+                log_error "Échec de l'authentification Docker Hub pour l'utilisateur '$REGISTRY_USERNAME'. Vérifiez registry_username/registry_password."
+                exit 1
+            fi
+        else
+            log_error "Aucun credential Docker Hub détecté (registry_token/registry_password) et aucune session active."
+            exit 1
+        fi
+
+        log_success "Authentifié sur Docker Hub"
+        log_info "Obtention du JWT Docker Hub pour l'API..."
+        get_dockerhub_jwt "$REGISTRY_USERNAME" "$local_auth_secret"
+        [ -n "$DOCKERHUB_JWT" ] && log_success "JWT Docker Hub obtenu" || true
+    fi
 fi
 
 # ============================================================================
