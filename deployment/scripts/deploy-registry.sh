@@ -2399,6 +2399,18 @@ cmd_deploy() {
         log_info "Stack monitoring: les images officielles seront téléchargées par docker compose"
         log_info "Le postgres-exporter sera buildé localement"
     else
+        # Authentification registry avant le pull
+        local registry_token="${REGISTRY_TOKEN:-}"
+        local registry_user="${REGISTRY_USERNAME:-}"
+        local registry_url="${REGISTRY_URL:-docker.io}"
+        if [ -n "$registry_token" ] && [ -n "$registry_user" ]; then
+            log_info "Authentification au registry ($registry_url)..."
+            if ! echo "$registry_token" | docker login "$registry_url" -u "$registry_user" --password-stdin 2>&1; then
+                log_warn "Authentification échouée — tentative de pull sans authentification"
+            fi
+        else
+            log_warn "REGISTRY_TOKEN ou REGISTRY_USERNAME non définis — pull sans authentification"
+        fi
         log_info "Téléchargement de l'image..."
         docker pull "$image_full"
     fi
@@ -2459,6 +2471,12 @@ cmd_pull() {
 
     log_header "TÉLÉCHARGEMENT - $image_full"
 
+    if [ -n "${REGISTRY_TOKEN:-}" ] && [ -n "${REGISTRY_USERNAME:-}" ]; then
+        log_info "Authentification au registry (${REGISTRY_URL:-docker.io})..."
+        if ! echo "$REGISTRY_TOKEN" | docker login "${REGISTRY_URL:-docker.io}" -u "$REGISTRY_USERNAME" --password-stdin 2>&1; then
+            log_warn "Authentification échouée — tentative de pull sans authentification"
+        fi
+    fi
     docker pull "$image_full"
 
     log_success "Image téléchargée"
