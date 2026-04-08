@@ -1,0 +1,145 @@
+#### 🎯 Contexte
+
+Nous utilisons un outil DevOps centralisé situé dans :
+`/home/jeeff/PycharmProjects/devops-data-engineng/deployment/devops`
+
+⚠️ **Important :**
+
+* On **ne se place pas dans ce dossier directement**
+* On exécute la commande `devops` **depuis le projet à déployer**
+  Exemple :
+
+  ```bash
+  cd /home/jeeff/PycharmProjects/cicbi-monitoring-platform
+  devops
+  ```
+* Les accès (SSH, registry, etc.) sont définis dans le fichier `.devops.yml` de chaque projet
+
+---
+
+## 🚀 Étape 1 : Build & Push Docker (Registry)
+
+### Objectif :
+
+Construire et pousser l’image Docker sur Docker Hub
+
+### Procédure :
+
+1. Lancer :
+
+   ```bash
+   devops
+   ```
+
+2. Choisir :
+
+   ```
+   3) registry - Gérer le Docker Registry
+   ```
+
+3. Ensuite :
+
+   ```
+   15) Build + Push Multi-Architecture FORCÉ (amd64)
+   ```
+
+4. Sélectionner l’environnement :
+
+   ```
+   1) dev
+   2) staging
+   3) prod
+   ```
+
+5. Répondre aux prompts :
+
+   ```
+   Confirmer le mode multi-arch forcé ? → yes
+   Choisir le tag → 6) Latest (dev-latest)
+   Build sans cache ? → y
+   Utiliser Git clone ? → n
+   ```
+
+---
+
+## 📦 Étape 2 : Création et copie du package serveur
+
+### Objectif :
+
+Générer le package minimal et le copier sur le serveur cible
+
+### Procédure :
+
+Dans le menu `devops` :
+
+```
+2) Créer et copier vers le serveur (SSH)
+```
+
+➡️ Cette étape :
+
+* Build le package minimal
+* Copie automatiquement sur le serveur via SSH
+
+---
+
+## 🖥️ Étape 3 : Déploiement sur le serveur
+
+### Objectif :
+
+Déployer l’application depuis Docker Hub sur le serveur
+
+### Procédure :
+
+1. Se connecter au serveur :
+
+   ```bash
+   ssh <user>@<host>
+   ```
+
+2. Aller dans le dossier de déploiement :
+
+   ```bash
+   cd /srv/home/cic-bi-airflow-dev
+   ```
+
+   ou
+
+   ```bash
+   cd /srv/home/cic-bi-airflow-prod
+   ```
+
+3. Lancer le script :
+
+   ```bash
+   ./scripts/deploy-registry.sh
+   ```
+
+4. Choisir :
+
+   ```
+   1) Déploiement via registry
+   ```
+
+5. Sélectionner :
+
+   * L’environnement
+   * Le tag (par défaut : `dev-latest`)
+
+6. Nettoyage :
+
+   ```
+   Nettoyer le déploiement local avant le deploy registry ? → N
+   ```
+
+   ⚠️ Mettre `Y` uniquement si vous souhaitez repartir de zéro
+
+---
+
+## ✅ Résumé opérationnel
+
+| Étape | Action              | Commande clé                    |
+| ----- | ------------------- | ------------------------------- |
+| 1     | Build & Push Docker | `devops → registry → option 15` |
+| 2     | Package + SCP       | `devops → option 2`             |
+| 3     | Déploiement serveur | `deploy-registry.sh`            |

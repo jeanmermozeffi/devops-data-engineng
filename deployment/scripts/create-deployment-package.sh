@@ -91,6 +91,24 @@ detect_deploy_env_suffix() {
     esac
 }
 
+resolve_ssh_path_for_env() {
+    local target_env="$1"
+    local source_path="${SERVER_DEPLOY_PATH:-${SSH_PATH:-/srv/home/${PROJECT_NAME}}}"
+    local path_basename
+    local path_parent
+    local path_prefix
+
+    path_basename="$(basename "$source_path")"
+    path_parent="$(dirname "$source_path")"
+
+    if [[ "$path_basename" =~ ^(.+)-(dev|staging|prod)$ ]]; then
+        path_prefix="${BASH_REMATCH[1]}"
+        echo "${path_parent}/${path_prefix}-${target_env}"
+    else
+        echo "$source_path"
+    fi
+}
+
 # Déterminer un stack_type fiable, y compris quand .devops.yml est imbriqué.
 detect_effective_stack_type() {
     local stack="${STACK_TYPE:-}"
@@ -304,10 +322,86 @@ ask_input() {
     eval "$var_name=\"$response\""
 }
 
+rotate_env_secrets_if_required() {
+    local target_env="$1"
+    local should_rotate="false"
+    local ask_rotation="false"
+
+    if [ -z "$target_env" ]; then
+        log_warn "Rotation des secrets ignorée: environnement non détecté"
+        return 0
+    fi
+
+    case "$target_env" in
+        staging|prod)
+            should_rotate="true"
+            ;;
+        dev)
+            ask_rotation="true"
+            ;;
+        *)
+            log_warn "Rotation des secrets ignorée: environnement invalide '$target_env'"
+            return 0
+            ;;
+    esac
+
+    if [ "$ask_rotation" = "true" ]; then
+        if ask_yes_no "Rotation des variables sensibles pour '${target_env}'" "n"; then
+            should_rotate="true"
+        fi
+    fi
+
+    if [ "$should_rotate" != "true" ]; then
+        log_info "Rotation des secrets non demandée pour '${target_env}'"
+        return 0
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 est requis pour la rotation des secrets"
+        return 1
+    fi
+
+    local rotation_script="$SCRIPT_DIR/rotate-env-secrets.py"
+    if [ ! -f "$rotation_script" ]; then
+        log_error "Script de rotation introuvable: $rotation_script"
+        return 1
+    fi
+
+    log_info "Rotation des secrets pour '${target_env}' en cours..."
+    if ! python3 "$rotation_script" --project-dir "$PROJECT_DIR" --env "$target_env"; then
+        log_error "Échec de la rotation des secrets pour '${target_env}'"
+        log_info "Configuration attendue dans ${PROJECT_DIR}/.env.rotation.yml ou ${PROJECT_DIR}/.devops.yml"
+        return 1
+    fi
+
+    log_success "✓ Rotation des secrets terminée pour '${target_env}'"
+    return 0
+}
+
 configure_ssh() {
     echo ""
     print_header "Configuration SSH"
     echo ""
+    local env_default=""
+
+    env_default="${ENV:-$(detect_deploy_env_suffix)}"
+    if [ -z "$env_default" ]; then
+        env_default="dev"
+    fi
+
+    while true; do
+        ask_input "Environnement cible (dev/staging/prod)" "$env_default" ENV
+        ENV="$(printf '%s' "$ENV" | tr '[:upper:]' '[:lower:]')"
+        case "$ENV" in
+            dev|staging|prod) break ;;
+            *)
+                log_warn "Environnement invalide: '$ENV' (attendu: dev, staging ou prod)"
+                ;;
+        esac
+    done
+
+    # Ajuster le chemin distant selon l'environnement choisi
+    SSH_PATH="$(resolve_ssh_path_for_env "$ENV")"
 
     # Vérifier si une configuration existe déjà
     if [ -n "$SSH_HOST" ]; then
@@ -315,6 +409,7 @@ configure_ssh() {
         echo ""
         print_separator
         echo -e "${WHITE}Configuration actuelle:${NC}"
+        echo -e "  Environnement: ${CYAN}${ENV}${NC}"
         echo -e "  Serveur    : ${CYAN}${SSH_USER}@${SSH_HOST}:${SSH_PORT}${NC}"
         echo -e "  Destination: ${CYAN}${SSH_PATH}${NC}"
         if [ -n "$SSH_IDENTITY_FILE" ]; then
@@ -364,6 +459,7 @@ configure_ssh() {
     echo ""
     print_separator
     echo -e "${WHITE}Récapitulatif SSH:${NC}"
+    echo -e "  Environnement: ${CYAN}${ENV}${NC}"
     echo -e "  Serveur    : ${CYAN}${SSH_USER}@${SSH_HOST}:${SSH_PORT}${NC}"
     echo -e "  Destination: ${CYAN}${SSH_PATH}${NC}"
     echo -e "  Auth       : ${CYAN}$([ "$SSH_USE_PASSWORD" == "true" ] && echo "Mot de passe" || echo "Clé SSH")${NC}"
@@ -412,9 +508,22 @@ show_menu() {
 create_package() {
     print_header "Création du package"
     echo ""
+    local target_deploy_env=""
+    local copy_all_env_compose="false"
 
     # Configurer les assets selon le stack_type
     configure_stack_assets
+
+    target_deploy_env="$(detect_deploy_env_suffix)"
+    if [ -n "$target_deploy_env" ]; then
+        log_info "Environnement cible détecté: ${target_deploy_env}"
+    else
+        log_warn "Environnement cible non détecté (ENV ou SERVER_DEPLOY_PATH)"
+    fi
+
+    if ! rotate_env_secrets_if_required "$target_deploy_env"; then
+        return 1
+    fi
 
     # Nettoyer et créer le dossier
     log_info "Préparation du dossier..."
@@ -425,18 +534,51 @@ create_package() {
     log_info "Copie des fichiers docker-compose..."
     COMPOSE_SRC="$PROJECT_DIR/$DEPLOYMENT_SUBDIR"
 
-    # Copier les fichiers docker-compose qui existent
-    for compose_file in docker-compose.yml docker-compose.registry.yml \
-                        docker-compose.dev.yml docker-compose.dev-registry.yml \
-                        docker-compose.staging.yml docker-compose.staging-registry.yml \
-                        docker-compose.prod.yml docker-compose.prod-registry.yml; do
-        if [ -f "$COMPOSE_SRC/$compose_file" ]; then
-            cp "$COMPOSE_SRC/$compose_file" "$PACKAGE_DIR/"
-            log_success "✓ $compose_file copié"
+    if ask_yes_no "Copier les docker-compose de tous les environnements" "n"; then
+        copy_all_env_compose="true"
+    fi
+
+    if [ "$copy_all_env_compose" = "true" ]; then
+        # Copier les fichiers docker-compose de tous les environnements
+        for compose_file in docker-compose.yml docker-compose.registry.yml \
+                            docker-compose.dev.yml docker-compose.dev-registry.yml \
+                            docker-compose.staging.yml docker-compose.staging-registry.yml \
+                            docker-compose.prod.yml docker-compose.prod-registry.yml; do
+            if [ -f "$COMPOSE_SRC/$compose_file" ]; then
+                cp "$COMPOSE_SRC/$compose_file" "$PACKAGE_DIR/"
+                log_success "✓ $compose_file copié"
+            else
+                log_warn "⚠️  $compose_file non trouvé (optionnel)"
+            fi
+        done
+    else
+        if [ -n "$target_deploy_env" ]; then
+            # Par défaut: copier uniquement les compose communs + ceux de l'environnement cible
+            for compose_file in docker-compose.yml docker-compose.registry.yml \
+                                "docker-compose.${target_deploy_env}.yml" \
+                                "docker-compose.${target_deploy_env}-registry.yml"; do
+                if [ -f "$COMPOSE_SRC/$compose_file" ]; then
+                    cp "$COMPOSE_SRC/$compose_file" "$PACKAGE_DIR/"
+                    log_success "✓ $compose_file copié"
+                else
+                    log_warn "⚠️  $compose_file non trouvé (optionnel)"
+                fi
+            done
         else
-            log_warn "⚠️  $compose_file non trouvé (optionnel)"
+            log_warn "⚠️  Environnement non détecté: copie de tous les docker-compose.*"
+            for compose_file in docker-compose.yml docker-compose.registry.yml \
+                                docker-compose.dev.yml docker-compose.dev-registry.yml \
+                                docker-compose.staging.yml docker-compose.staging-registry.yml \
+                                docker-compose.prod.yml docker-compose.prod-registry.yml; do
+                if [ -f "$COMPOSE_SRC/$compose_file" ]; then
+                    cp "$COMPOSE_SRC/$compose_file" "$PACKAGE_DIR/"
+                    log_success "✓ $compose_file copié"
+                else
+                    log_warn "⚠️  $compose_file non trouvé (optionnel)"
+                fi
+            done
         fi
-    done
+    fi
 
     # Inclure les agents monitoring selon le stack_type
     if [ "${INCLUDE_MONITORING}" != "false" ]; then
@@ -598,36 +740,34 @@ create_package() {
     fi
 
     # Copier les vrais fichiers .env depuis la racine du projet
+    # Priorité: copier uniquement le .env de l'environnement cible.
+    # Fallback: si aucun env n'est détecté, conserver l'ancien comportement (copie des 3 fichiers).
     log_info "📋 Copie des fichiers .env réels (seront auto-chiffrés sur le serveur)..."
     echo ""
 
     ENV_COPIED=false
+    TARGET_DEPLOY_ENV="$target_deploy_env"
 
-    # Copier .env.dev
-    if [ -f "$PROJECT_DIR/.env.dev" ]; then
-        cp "$PROJECT_DIR/.env.dev" "$PACKAGE_DIR/"
-        log_success "✓ .env.dev copié"
-        ENV_COPIED=true
+    if [ -n "$TARGET_DEPLOY_ENV" ]; then
+        TARGET_ENV_FILE="$PROJECT_DIR/.env.${TARGET_DEPLOY_ENV}"
+        if [ -f "$TARGET_ENV_FILE" ]; then
+            cp "$TARGET_ENV_FILE" "$PACKAGE_DIR/"
+            log_success "✓ .env.${TARGET_DEPLOY_ENV} copié (environnement cible)"
+            ENV_COPIED=true
+        else
+            log_warn "⚠️  .env.${TARGET_DEPLOY_ENV} non trouvé"
+        fi
     else
-        log_warn "⚠️  .env.dev non trouvé"
-    fi
-
-    # Copier .env.staging
-    if [ -f "$PROJECT_DIR/.env.staging" ]; then
-        cp "$PROJECT_DIR/.env.staging" "$PACKAGE_DIR/"
-        log_success "✓ .env.staging copié"
-        ENV_COPIED=true
-    else
-        log_warn "⚠️  .env.staging non trouvé"
-    fi
-
-    # Copier .env.prod
-    if [ -f "$PROJECT_DIR/.env.prod" ]; then
-        cp "$PROJECT_DIR/.env.prod" "$PACKAGE_DIR/"
-        log_success "✓ .env.prod copié"
-        ENV_COPIED=true
-    else
-        log_warn "⚠️  .env.prod non trouvé"
+        log_warn "⚠️  Environnement non détecté (ENV ou SERVER_DEPLOY_PATH), fallback: copie de tous les .env.*"
+        for env_name in dev staging prod; do
+            if [ -f "$PROJECT_DIR/.env.${env_name}" ]; then
+                cp "$PROJECT_DIR/.env.${env_name}" "$PACKAGE_DIR/"
+                log_success "✓ .env.${env_name} copié"
+                ENV_COPIED=true
+            else
+                log_warn "⚠️  .env.${env_name} non trouvé"
+            fi
+        done
     fi
 
     # Inclure les outils Superset (optionnel)
@@ -689,8 +829,8 @@ create_package() {
         log_info "Outils Superset non inclus (imports via CI/CD uniquement)"
     fi
 
-    # Inclure le compose RH (base de donnees test) — non applicable pour le stack monitoring
-    if [ "${STACK_TYPE}" != "monitoring" ]; then
+    # Inclure le compose RH (base de donnees test) uniquement pour les stacks Superset
+    if [ "${STACK_TYPE}" = "reporting-superset" ] || [ "${STACK_TYPE}" = "superset" ]; then
         RH_SOURCE_DIRS=("$PROJECT_DIR")
         if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
             RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
@@ -726,6 +866,8 @@ create_package() {
         else
             log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
         fi
+    else
+        log_info "Compose RH ignoré (stack_type=${STACK_TYPE:-non défini}, requis: reporting-superset)"
     fi
 
     # Copier Makefile si present (utile pour outils/venv locaux)
@@ -740,10 +882,15 @@ create_package() {
         log_error "Aucun fichier .env trouvé à la racine du projet"
         log_info "Création des fichiers depuis .env.example..."
         if [ -f "$PROJECT_DIR/.env.example" ]; then
-            cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.dev"
-            cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.staging"
-            cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.prod"
-            log_warn "⚠️  Fichiers .env créés depuis .env.example - À configurer !"
+            if [ -n "$TARGET_DEPLOY_ENV" ]; then
+                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.${TARGET_DEPLOY_ENV}"
+                log_warn "⚠️  .env.${TARGET_DEPLOY_ENV} créé depuis .env.example - À configurer !"
+            else
+                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.dev"
+                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.staging"
+                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.prod"
+                log_warn "⚠️  Fichiers .env créés depuis .env.example - À configurer !"
+            fi
         fi
     fi
 
@@ -915,9 +1062,6 @@ EOFPROFILE
     SCRIPTS_TO_COPY=(
         "config-loader.sh"
         "deploy-registry.sh"
-        "diagnose-php-connection.sh"
-        "fix-vps-complete.sh"
-        "fix-docker-dns-global.sh"
         "env-encrypt.py"
         "sensitive-vars.yml"
         "auto-encrypt-envs.sh"
@@ -1161,11 +1305,11 @@ done
 ### Diagnostic
 
 ```bash
-# Tester la connexion PHP
-./scripts/diagnose-php-connection.sh dev
+# Vérifier le statut
+./scripts/deploy-registry.sh status dev
 
-# Corriger les DNS (si timeout)
-sudo ./scripts/fix-docker-dns-global.sh
+# Voir les logs d'un service
+./scripts/deploy-registry.sh logs dev ${PROJECT_NAME}-api
 ```
 
 ## 🔐 Sécurité
@@ -1539,12 +1683,51 @@ clean_server() {
         return 1
     fi
 
+    # Demander explicitement l'environnement cible avant toute action destructive
+    local cleanup_env_default
+    local cleanup_env
+    local cleanup_target_path
+    local path_basename
+    local path_parent
+    local path_prefix
+
+    cleanup_env_default="$(detect_deploy_env_suffix)"
+    if [ -z "$cleanup_env_default" ]; then
+        cleanup_env_default="dev"
+    fi
+
+    while true; do
+        ask_input "Environnement à nettoyer (dev/staging/prod)" "$cleanup_env_default" cleanup_env
+        cleanup_env="$(printf '%s' "$cleanup_env" | tr '[:upper:]' '[:lower:]')"
+        case "$cleanup_env" in
+            dev|staging|prod) break ;;
+            *)
+                log_warn "Environnement invalide: '$cleanup_env' (attendu: dev, staging ou prod)"
+                ;;
+        esac
+    done
+
+    # Aligner ENV avec le choix utilisateur pour cohérence des logs et des scripts appelés
+    ENV="$cleanup_env"
+
+    # Construire un chemin cible cohérent avec l'environnement choisi
+    cleanup_target_path="$SSH_PATH"
+    path_basename="$(basename "$cleanup_target_path")"
+    path_parent="$(dirname "$cleanup_target_path")"
+    if [[ "$path_basename" =~ ^(.+)-(dev|staging|prod)$ ]]; then
+        path_prefix="${BASH_REMATCH[1]}"
+        cleanup_target_path="${path_parent}/${path_prefix}-${cleanup_env}"
+    fi
+
+    ask_input "Chemin de destination à nettoyer" "$cleanup_target_path" cleanup_target_path
+
     log_warn "⚠️  ${RED}DANGER${NC} ⚠️"
     echo ""
     echo "Cette opération va ${RED}SUPPRIMER COMPLÈTEMENT${NC} le déploiement sur le serveur :"
     echo ""
     echo -e "  Serveur    : ${CYAN}${SSH_USER}@${SSH_HOST}:${SSH_PORT}${NC}"
-    echo -e "  Chemin     : ${CYAN}${SSH_PATH}${NC}"
+    echo -e "  Environnement: ${CYAN}${cleanup_env}${NC}"
+    echo -e "  Chemin     : ${CYAN}${cleanup_target_path}${NC}"
     echo ""
     echo -e "${RED}Tout sera supprimé :${NC}"
     echo "  - Fichiers de configuration (.env, docker-compose, etc.)"
@@ -1617,22 +1800,22 @@ EOF
 
         cleanup_output=$(
             sshpass -p "$SSH_PASSWORD" ssh -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-                "bash -s -- '$SSH_PATH'" <<<"$remote_cleanup_cmd"
+                "bash -s -- '$cleanup_target_path'" <<<"$remote_cleanup_cmd"
         ) || cleanup_rc=$?
     else
         # Avec clé SSH
         cleanup_output=$(
             ssh $SSH_OPTIONS -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-                "bash -s -- '$SSH_PATH'" <<<"$remote_cleanup_cmd"
+                "bash -s -- '$cleanup_target_path'" <<<"$remote_cleanup_cmd"
         ) || cleanup_rc=$?
     fi
 
     echo ""
     if printf '%s\n' "$cleanup_output" | grep -q "^CLEANUP_OK$"; then
-        log_success "Serveur nettoyé : ${SSH_PATH}"
+        log_success "Serveur nettoyé : ${cleanup_target_path}"
         log_info "Le dossier est maintenant vide"
     elif printf '%s\n' "$cleanup_output" | grep -q "^TARGET_MISSING$"; then
-        log_warn "Chemin distant absent : ${SSH_PATH} (rien à nettoyer)"
+        log_warn "Chemin distant absent : ${cleanup_target_path} (rien à nettoyer)"
     else
         if ask_yes_no "Permissions insuffisantes. Tenter un nettoyage sudo interactif" "y"; then
             log_info "Tentative sudo interactive..."
@@ -1642,24 +1825,24 @@ EOF
             if [ "$SSH_USE_PASSWORD" == "true" ]; then
                 cleanup_output=$(
                     sshpass -p "$SSH_PASSWORD" ssh -tt -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$SSH_PATH'"
+                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$cleanup_target_path'"
                 ) || cleanup_rc=$?
             else
                 cleanup_output=$(
                     ssh $SSH_OPTIONS -tt -p "$SSH_PORT" "${SSH_USER}@${SSH_HOST}" \
-                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$SSH_PATH'"
+                        "bash -lc 'TARGET_PATH=\"\$1\"; if [ ! -d \"\$TARGET_PATH\" ]; then echo TARGET_MISSING; exit 0; fi; sudo find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; remaining=\$(find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -print 2>/dev/null | head -n 1 || true); if [ -n \"\$remaining\" ]; then echo CLEANUP_INCOMPLETE; find \"\$TARGET_PATH\" -mindepth 1 -maxdepth 1 -ls 2>/dev/null || true; exit 2; fi; echo CLEANUP_OK' _ '$cleanup_target_path'"
                 ) || cleanup_rc=$?
             fi
 
             if printf '%s\n' "$cleanup_output" | grep -q "^CLEANUP_OK$"; then
-                log_success "Serveur nettoyé : ${SSH_PATH}"
+                log_success "Serveur nettoyé : ${cleanup_target_path}"
                 log_info "Le dossier est maintenant vide"
                 echo ""
                 return 0
             fi
         fi
 
-        log_error "Nettoyage incomplet sur ${SSH_PATH}"
+        log_error "Nettoyage incomplet sur ${cleanup_target_path}"
         log_warn "Des fichiers/répertoires n'ont pas pu être supprimés (permissions)."
         if [ "$cleanup_rc" -ne 0 ]; then
             log_warn "Code retour SSH: $cleanup_rc"
