@@ -1,0 +1,1235 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+APP_ID="devops-enginering"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/${APP_ID}"
+MANIFEST_FILE="${STATE_DIR}/install.env"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/${APP_ID}"
+DEFAULT_MANAGED_REPO_DIR="${DATA_DIR}/repo"
+
+COLOR_RESET="\033[0m"
+COLOR_RED="\033[0;31m"
+COLOR_GREEN="\033[0;32m"
+COLOR_YELLOW="\033[0;33m"
+COLOR_BLUE="\033[0;34m"
+COLOR_CYAN="\033[0;36m"
+
+MANIFEST_TMP=""
+
+SCOPE_DEPLOYMENT=0
+SCOPE_GIT_DEVOPS=0
+
+print_usage() {
+    cat <<'EOF'
+Usage:
+  ./devops-manager.sh install [options]
+  ./devops-manager.sh update [options]
+  ./devops-manager.sh uninstall [options]
+  ./devops-manager.sh status
+
+Install options:
+  --scope <all|deployment|git-devops|deployment,git-devops>
+  --source <managed|local>         (default: managed in interactive mode, local in non-interactive mode)
+  --repo-url <url>                 (required for --source managed if not detectable)
+  --ref <branch-or-tag>            (default: main, tracked ref for updates)
+  --managed-dir <path>             (default: ~/.local/share/devops-enginering/repo)
+  --bin-dir <path>                 (default: ~/.local/bin or ~/bin)
+  --no-git-alias                   (skip git alias: git deploy)
+  --yes                            (skip confirmation prompts)
+  --non-interactive
+  --help
+
+Update options:
+  --scope <all|deployment|git-devops|deployment,git-devops>
+  --latest                         (managed source only; default in non-interactive mode)
+  --version <tag-or-ref>           (managed source only)
+  --rollback                       (managed source only; uses previous commit)
+  --reinstall                      (re-link current source without changing git ref)
+  --bin-dir <path>                 (override bin dir for this update)
+  --no-git-alias                   (skip git alias refresh)
+  --yes                            (skip confirmation prompts)
+  --non-interactive
+  --help
+
+Status:
+  ./devops-manager.sh status
+
+Uninstall options:
+  --scope <all|deployment|git-devops|deployment,git-devops>
+  --remove-managed-source          (if source mode is managed and no scope remains)
+  --remove-git-alias              (remove global alias: git deploy)
+  --bin-dir <path>                (override bin dir if needed)
+  --yes                           (skip confirmation prompts)
+  --non-interactive
+  --help
+EOF
+}
+
+log_info() { printf "%b[INFO]%b %s\n" "$COLOR_BLUE" "$COLOR_RESET" "$*"; }
+log_ok() { printf "%b[OK]%b %s\n" "$COLOR_GREEN" "$COLOR_RESET" "$*"; }
+log_warn() { printf "%b[WARN]%b %s\n" "$COLOR_YELLOW" "$COLOR_RESET" "$*"; }
+log_error() { printf "%b[ERROR]%b %s\n" "$COLOR_RED" "$COLOR_RESET" "$*" >&2; }
+
+die() {
+    log_error "$*"
+    exit 1
+}
+
+trim() {
+    local text="$1"
+    text="${text#"${text%%[![:space:]]*}"}"
+    text="${text%"${text##*[![:space:]]}"}"
+    printf "%s" "$text"
+}
+
+now_iso_utc() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+default_bin_dir() {
+    if [[ ":$PATH:" == *":$HOME/.local/bin:"* ]] || [ -d "$HOME/.local/bin" ]; then
+        printf "%s/.local/bin" "$HOME"
+        return
+    fi
+    if [[ ":$PATH:" == *":$HOME/bin:"* ]] || [ -d "$HOME/bin" ]; then
+        printf "%s/bin" "$HOME"
+        return
+    fi
+    printf "%s/.local/bin" "$HOME"
+}
+
+path_contains_dir() {
+    local dir="$1"
+    [[ ":$PATH:" == *":$dir:"* ]]
+}
+
+confirm_yes_no() {
+    local question="$1"
+    local default_choice="${2:-y}"
+    local reply=""
+    local lowered=""
+    local prompt="[y/N]"
+
+    if [ "$default_choice" = "y" ]; then
+        prompt="[Y/n]"
+    fi
+
+    read -r -p "$question $prompt: " reply
+    reply="$(trim "$reply")"
+
+    if [ -z "$reply" ]; then
+        reply="$default_choice"
+    fi
+
+    lowered="$(printf "%s" "$reply" | tr '[:upper:]' '[:lower:]')"
+    case "$lowered" in
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+reset_scope_flags() {
+    SCOPE_DEPLOYMENT=0
+    SCOPE_GIT_DEVOPS=0
+}
+
+parse_scope_flags() {
+    local raw_scope="${1:-all}"
+    local normalized
+    local token
+    local parts=()
+
+    reset_scope_flags
+
+    normalized="$(printf "%s" "$raw_scope" | tr '[:upper:]' '[:lower:]')"
+    normalized="$(trim "$normalized")"
+
+    if [ -z "$normalized" ] || [ "$normalized" = "all" ]; then
+        SCOPE_DEPLOYMENT=1
+        SCOPE_GIT_DEVOPS=1
+        return
+    fi
+
+    IFS=',' read -r -a parts <<< "$normalized"
+    for token in "${parts[@]}"; do
+        token="$(trim "$token")"
+        case "$token" in
+            all)
+                SCOPE_DEPLOYMENT=1
+                SCOPE_GIT_DEVOPS=1
+                ;;
+            deployment|deploy)
+                SCOPE_DEPLOYMENT=1
+                ;;
+            git-devops|gitdevops|git-deploy|git)
+                SCOPE_GIT_DEVOPS=1
+                ;;
+            *)
+                die "Scope invalide: '$token'. Utilisez all, deployment ou git-devops."
+                ;;
+        esac
+    done
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 0 ] && [ "$SCOPE_GIT_DEVOPS" -eq 0 ]; then
+        die "Aucun scope valide sélectionné."
+    fi
+}
+
+scope_label() {
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ] && [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        printf "all"
+        return
+    fi
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        printf "deployment"
+        return
+    fi
+    printf "git-devops"
+}
+
+scope_list() {
+    local list=""
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        list="deployment"
+    fi
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        if [ -n "$list" ]; then
+            list="$list,git-devops"
+        else
+            list="git-devops"
+        fi
+    fi
+    printf "%s" "$list"
+}
+
+ensure_command() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 || die "Commande requise introuvable: $cmd"
+}
+
+detect_origin_url() {
+    local repo_dir="$1"
+    if [ -d "$repo_dir/.git" ]; then
+        git -C "$repo_dir" remote get-url origin 2>/dev/null || true
+    fi
+}
+
+git_commit() {
+    local repo_dir="$1"
+    if git -C "$repo_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+        git -C "$repo_dir" rev-parse HEAD
+        return
+    fi
+    printf "n/a"
+}
+
+git_ref() {
+    local repo_dir="$1"
+    local value=""
+
+    value="$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+        printf "%s" "$value"
+        return
+    fi
+
+    value="$(git -C "$repo_dir" describe --tags --exact-match 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+        printf "tags/%s" "$value"
+        return
+    fi
+
+    value="$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || true)"
+    if [ -n "$value" ]; then
+        printf "detached/%s" "$value"
+        return
+    fi
+
+    printf "n/a"
+}
+
+git_version_label() {
+    local repo_dir="$1"
+    local label=""
+
+    label="$(git -C "$repo_dir" describe --tags --always --dirty 2>/dev/null || true)"
+    if [ -n "$label" ]; then
+        printf "%s" "$label"
+        return
+    fi
+
+    if [ -f "$repo_dir/deployment/VERSION" ]; then
+        label="$(tr -d '\n' < "$repo_dir/deployment/VERSION")"
+        if [ -n "$label" ]; then
+            printf "%s" "$label"
+            return
+        fi
+    fi
+
+    printf "unknown"
+}
+
+checkout_repo_ref() {
+    local repo_dir="$1"
+    local target_ref="$2"
+
+    [ -n "$target_ref" ] || die "Référence git vide."
+
+    git -C "$repo_dir" fetch --tags --prune origin
+
+    if git -C "$repo_dir" show-ref --verify --quiet "refs/tags/$target_ref"; then
+        git -C "$repo_dir" checkout --quiet "tags/$target_ref"
+        return
+    fi
+
+    if git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$target_ref"; then
+        git -C "$repo_dir" checkout --quiet -B "$target_ref" "origin/$target_ref"
+        git -C "$repo_dir" pull --ff-only --quiet origin "$target_ref" || true
+        return
+    fi
+
+    if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$target_ref"; then
+        git -C "$repo_dir" checkout --quiet "$target_ref"
+        git -C "$repo_dir" pull --ff-only --quiet || true
+        return
+    fi
+
+    git -C "$repo_dir" checkout --quiet "$target_ref"
+}
+
+prepare_managed_source() {
+    local repo_url="$1"
+    local track_ref="$2"
+    local managed_repo_dir="$3"
+
+    ensure_command git
+    [ -n "$repo_url" ] || die "URL du dépôt requise pour le mode managed."
+
+    mkdir -p "$(dirname "$managed_repo_dir")"
+
+    if [ -d "$managed_repo_dir/.git" ]; then
+        local current_remote=""
+        current_remote="$(git -C "$managed_repo_dir" remote get-url origin 2>/dev/null || true)"
+        if [ -n "$current_remote" ] && [ "$current_remote" != "$repo_url" ]; then
+            die "Le dépôt géré existant utilise '$current_remote'. Choisissez un autre --managed-dir ou alignez --repo-url."
+        fi
+        log_info "Mise à jour du dépôt géré dans $managed_repo_dir"
+        git -C "$managed_repo_dir" fetch --tags --prune origin
+    elif [ -e "$managed_repo_dir" ]; then
+        die "$managed_repo_dir existe mais n'est pas un dépôt git."
+    else
+        log_info "Clone du dépôt dans $managed_repo_dir"
+        git clone "$repo_url" "$managed_repo_dir"
+    fi
+
+    checkout_repo_ref "$managed_repo_dir" "$track_ref"
+}
+
+validate_source_for_scope() {
+    local source_dir="$1"
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        [ -f "$source_dir/deployment/devops" ] || die "Fichier introuvable: $source_dir/deployment/devops"
+    fi
+
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        [ -f "$source_dir/git-devops/git-deploy.sh" ] || die "Fichier introuvable: $source_dir/git-devops/git-deploy.sh"
+    fi
+}
+
+install_deployment_cli() {
+    local source_dir="$1"
+    local bin_dir="$2"
+    local source_file="$source_dir/deployment/devops"
+    local target_file="$bin_dir/devops"
+
+    mkdir -p "$bin_dir"
+    chmod +x "$source_file" || true
+    ln -sfn "$source_file" "$target_file"
+    log_ok "Commande installée: $target_file -> $source_file"
+}
+
+install_git_deploy_cli() {
+    local source_dir="$1"
+    local bin_dir="$2"
+    local source_file="$source_dir/git-devops/git-deploy.sh"
+    local target_file="$bin_dir/git-deploy"
+
+    mkdir -p "$bin_dir"
+    chmod +x "$source_file" || true
+    ln -sfn "$source_file" "$target_file"
+    log_ok "Commande installée: $target_file -> $source_file"
+}
+
+configure_git_alias() {
+    local enable_alias="$1"
+    if [ "$enable_alias" != "1" ]; then
+        log_info "Alias git deploy ignoré (option --no-git-alias)."
+        return
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        log_warn "git est introuvable, alias global non configuré."
+        return
+    fi
+
+    if git config --global alias.deploy '!git-deploy'; then
+        log_ok "Alias global configuré: git deploy -> git-deploy"
+    else
+        log_warn "Impossible de mettre à jour ~/.gitconfig automatiquement. Configurez manuellement: git config --global alias.deploy '!git-deploy'"
+    fi
+}
+
+install_selected_components() {
+    local source_dir="$1"
+    local bin_dir="$2"
+    local enable_alias="$3"
+
+    validate_source_for_scope "$source_dir"
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        install_deployment_cli "$source_dir" "$bin_dir"
+    fi
+
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        install_git_deploy_cli "$source_dir" "$bin_dir"
+        configure_git_alias "$enable_alias"
+    fi
+}
+
+remove_command_entry() {
+    local command_path="$1"
+    local label="$2"
+    local interactive="$3"
+    local assume_yes="$4"
+
+    if [ -L "$command_path" ]; then
+        rm -f "$command_path"
+        log_ok "Lien supprimé ($label): $command_path"
+        return
+    fi
+
+    if [ -f "$command_path" ]; then
+        if [ "$interactive" = "1" ] && [ "$assume_yes" != "1" ]; then
+            if confirm_yes_no "$command_path est un fichier régulier. Le supprimer ?" "n"; then
+                rm -f "$command_path"
+                log_ok "Fichier supprimé ($label): $command_path"
+            else
+                log_warn "Suppression ignorée ($label): $command_path"
+            fi
+            return
+        fi
+        log_warn "$command_path est un fichier régulier. Non supprimé automatiquement."
+        return
+    fi
+
+    log_info "Aucun fichier à supprimer pour $label ($command_path)"
+}
+
+remove_git_alias_deploy() {
+    if ! command -v git >/dev/null 2>&1; then
+        log_warn "git est introuvable, impossible de gérer l'alias global."
+        return
+    fi
+
+    if ! git config --global --get alias.deploy >/dev/null 2>&1; then
+        log_info "Alias global git deploy non présent."
+        return
+    fi
+
+    if git config --global --unset alias.deploy; then
+        log_ok "Alias global supprimé: git deploy"
+    else
+        log_warn "Impossible de supprimer automatiquement l'alias global git deploy."
+    fi
+}
+
+remove_managed_source_directory() {
+    local managed_repo_dir="$1"
+
+    if [ -z "$managed_repo_dir" ] || [ "$managed_repo_dir" = "/" ] || [ "$managed_repo_dir" = "$HOME" ]; then
+        log_warn "Chemin managed non sûr, suppression ignorée: $managed_repo_dir"
+        return
+    fi
+
+    if [ ! -d "$managed_repo_dir" ]; then
+        log_info "Dossier managed absent: $managed_repo_dir"
+        return
+    fi
+
+    rm -rf "$managed_repo_dir"
+    log_ok "Dossier source managed supprimé: $managed_repo_dir"
+}
+
+manifest_write_var() {
+    local key="$1"
+    local value="$2"
+    printf "%s=%q\n" "$key" "$value" >> "$MANIFEST_TMP"
+}
+
+write_manifest_file() {
+    local source_mode="$1"
+    local source_dir="$2"
+    local managed_repo_dir="$3"
+    local repo_url="$4"
+    local track_ref="$5"
+    local bin_dir="$6"
+    local enable_git_alias="$7"
+    local current_ref="$8"
+    local current_commit="$9"
+    local current_version="${10}"
+    local previous_ref="${11}"
+    local previous_commit="${12}"
+    local previous_version="${13}"
+
+    mkdir -p "$STATE_DIR"
+    MANIFEST_TMP="${MANIFEST_FILE}.tmp"
+    : > "$MANIFEST_TMP"
+
+    manifest_write_var "MANIFEST_VERSION" "1"
+    manifest_write_var "APP_ID" "$APP_ID"
+    manifest_write_var "INSTALLED_AT" "$(now_iso_utc)"
+    manifest_write_var "SOURCE_MODE" "$source_mode"
+    manifest_write_var "SOURCE_DIR" "$source_dir"
+    manifest_write_var "MANAGED_REPO_DIR" "$managed_repo_dir"
+    manifest_write_var "REPO_URL" "$repo_url"
+    manifest_write_var "TRACK_REF" "$track_ref"
+    manifest_write_var "BIN_DIR" "$bin_dir"
+    manifest_write_var "INSTALL_DEPLOYMENT" "$SCOPE_DEPLOYMENT"
+    manifest_write_var "INSTALL_GIT_DEVOPS" "$SCOPE_GIT_DEVOPS"
+    manifest_write_var "ENABLE_GIT_ALIAS" "$enable_git_alias"
+    manifest_write_var "CURRENT_REF" "$current_ref"
+    manifest_write_var "CURRENT_COMMIT" "$current_commit"
+    manifest_write_var "CURRENT_VERSION" "$current_version"
+    manifest_write_var "PREVIOUS_REF" "$previous_ref"
+    manifest_write_var "PREVIOUS_COMMIT" "$previous_commit"
+    manifest_write_var "PREVIOUS_VERSION" "$previous_version"
+
+    mv "$MANIFEST_TMP" "$MANIFEST_FILE"
+    MANIFEST_TMP=""
+    log_ok "Manifeste mis à jour: $MANIFEST_FILE"
+}
+
+load_manifest_file() {
+    [ -f "$MANIFEST_FILE" ] || die "Aucune installation détectée. Lancez d'abord ./install.sh"
+    # shellcheck disable=SC1090
+    source "$MANIFEST_FILE"
+
+    MANIFEST_VERSION="${MANIFEST_VERSION:-}"
+    SOURCE_MODE="${SOURCE_MODE:-}"
+    SOURCE_DIR="${SOURCE_DIR:-}"
+    MANAGED_REPO_DIR="${MANAGED_REPO_DIR:-$DEFAULT_MANAGED_REPO_DIR}"
+    REPO_URL="${REPO_URL:-}"
+    TRACK_REF="${TRACK_REF:-main}"
+    BIN_DIR="${BIN_DIR:-$(default_bin_dir)}"
+    INSTALL_DEPLOYMENT="${INSTALL_DEPLOYMENT:-0}"
+    INSTALL_GIT_DEVOPS="${INSTALL_GIT_DEVOPS:-0}"
+    ENABLE_GIT_ALIAS="${ENABLE_GIT_ALIAS:-1}"
+    CURRENT_REF="${CURRENT_REF:-n/a}"
+    CURRENT_COMMIT="${CURRENT_COMMIT:-n/a}"
+    CURRENT_VERSION="${CURRENT_VERSION:-unknown}"
+    PREVIOUS_REF="${PREVIOUS_REF:-}"
+    PREVIOUS_COMMIT="${PREVIOUS_COMMIT:-}"
+    PREVIOUS_VERSION="${PREVIOUS_VERSION:-}"
+}
+
+interactive_choose_scope() {
+    local choice=""
+    echo ""
+    echo "Quel périmètre installer ?"
+    echo "  1) all (deployment + git-devops)"
+    echo "  2) deployment"
+    echo "  3) git-devops"
+    read -r -p "Choix [1-3] (1): " choice
+    choice="$(trim "$choice")"
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1) parse_scope_flags "all" ;;
+        2) parse_scope_flags "deployment" ;;
+        3) parse_scope_flags "git-devops" ;;
+        *) die "Choix invalide: $choice" ;;
+    esac
+}
+
+interactive_choose_source_mode() {
+    local choice=""
+    echo ""
+    echo "Mode source :"
+    echo "  1) managed (recommandé: clone dans ~/.local/share, update simple)"
+    echo "  2) local (utilise ce checkout actuel)"
+    read -r -p "Choix [1-2] (1): " choice
+    choice="$(trim "$choice")"
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1) printf "managed" ;;
+        2) printf "local" ;;
+        *) die "Choix invalide: $choice" ;;
+    esac
+}
+
+interactive_choose_update_action() {
+    local source_mode="$1"
+    local can_rollback="$2"
+    local choice=""
+
+    if [ "$source_mode" != "managed" ]; then
+        printf "reinstall"
+        return
+    fi
+
+    echo ""
+    echo "Action de mise à jour :"
+    echo "  1) latest   (met à jour TRACK_REF)"
+    echo "  2) version  (tag/ref spécifique)"
+    if [ "$can_rollback" = "1" ]; then
+        echo "  3) rollback (revient au commit précédent)"
+        echo "  4) reinstall (sans changer de ref)"
+        read -r -p "Choix [1-4] (1): " choice
+        choice="$(trim "$choice")"
+        choice="${choice:-1}"
+        case "$choice" in
+            1) printf "latest" ;;
+            2) printf "version" ;;
+            3) printf "rollback" ;;
+            4) printf "reinstall" ;;
+            *) die "Choix invalide: $choice" ;;
+        esac
+        return
+    fi
+
+    echo "  3) reinstall (sans changer de ref)"
+    read -r -p "Choix [1-3] (1): " choice
+    choice="$(trim "$choice")"
+    choice="${choice:-1}"
+    case "$choice" in
+        1) printf "latest" ;;
+        2) printf "version" ;;
+        3) printf "reinstall" ;;
+        *) die "Choix invalide: $choice" ;;
+    esac
+}
+
+install_command() {
+    local scope_input=""
+    local source_mode=""
+    local repo_url=""
+    local track_ref="main"
+    local managed_repo_dir="$DEFAULT_MANAGED_REPO_DIR"
+    local bin_dir
+    local enable_git_alias="1"
+    local interactive=1
+    local assume_yes=0
+    local source_dir=""
+    local source_dir_override=""
+
+    bin_dir="$(default_bin_dir)"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --scope) scope_input="${2:-}"; shift 2 ;;
+            --source) source_mode="${2:-}"; shift 2 ;;
+            --repo-url) repo_url="${2:-}"; shift 2 ;;
+            --ref) track_ref="${2:-}"; shift 2 ;;
+            --managed-dir) managed_repo_dir="${2:-}"; shift 2 ;;
+            --bin-dir) bin_dir="${2:-}"; shift 2 ;;
+            --source-dir) source_dir_override="${2:-}"; shift 2 ;;
+            --no-git-alias) enable_git_alias="0"; shift ;;
+            --yes) assume_yes=1; shift ;;
+            --non-interactive) interactive=0; shift ;;
+            --help|-h) print_usage; exit 0 ;;
+            *) die "Option inconnue: $1" ;;
+        esac
+    done
+
+    if [ "$interactive" -eq 1 ]; then
+        echo -e "${COLOR_CYAN}Installation interactive DevOps tooling${COLOR_RESET}"
+
+        if [ -z "$scope_input" ]; then
+            interactive_choose_scope
+        else
+            parse_scope_flags "$scope_input"
+        fi
+
+        if [ -z "$source_mode" ]; then
+            source_mode="$(interactive_choose_source_mode)"
+        fi
+
+        case "$source_mode" in
+            managed|local) ;;
+            *) die "Mode source invalide: $source_mode" ;;
+        esac
+
+        if [ "$source_mode" = "managed" ]; then
+            if [ -z "$repo_url" ]; then
+                repo_url="$(detect_origin_url "$SCRIPT_DIR")"
+            fi
+            read -r -p "Repository URL [$repo_url]: " input_repo
+            input_repo="$(trim "$input_repo")"
+            if [ -n "$input_repo" ]; then
+                repo_url="$input_repo"
+            fi
+            [ -n "$repo_url" ] || die "repo-url requis en mode managed."
+
+            read -r -p "Ref suivie pour update [$track_ref]: " input_ref
+            input_ref="$(trim "$input_ref")"
+            if [ -n "$input_ref" ]; then
+                track_ref="$input_ref"
+            fi
+
+            read -r -p "Dossier clone géré [$managed_repo_dir]: " input_managed_dir
+            input_managed_dir="$(trim "$input_managed_dir")"
+            if [ -n "$input_managed_dir" ]; then
+                managed_repo_dir="$input_managed_dir"
+            fi
+        fi
+
+        read -r -p "Dossier des commandes globales [$bin_dir]: " input_bin
+        input_bin="$(trim "$input_bin")"
+        if [ -n "$input_bin" ]; then
+            bin_dir="$input_bin"
+        fi
+
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+            if ! confirm_yes_no "Configurer/mettre à jour l'alias global 'git deploy' ?" "y"; then
+                enable_git_alias="0"
+            fi
+        fi
+
+        if [ "$assume_yes" -eq 0 ]; then
+            echo ""
+            echo "Résumé installation:"
+            echo "  Scope       : $(scope_label) ($(scope_list))"
+            echo "  Source mode : $source_mode"
+            if [ "$source_mode" = "managed" ]; then
+                echo "  Repo URL    : $repo_url"
+                echo "  Track ref   : $track_ref"
+                echo "  Managed dir : $managed_repo_dir"
+            else
+                echo "  Source dir  : ${source_dir_override:-$SCRIPT_DIR}"
+            fi
+            echo "  Bin dir     : $bin_dir"
+            echo "  Git alias   : $enable_git_alias"
+            if ! confirm_yes_no "Continuer l'installation ?" "y"; then
+                die "Installation annulée."
+            fi
+        fi
+    else
+        if [ -z "$scope_input" ]; then
+            scope_input="all"
+        fi
+        parse_scope_flags "$scope_input"
+        if [ -z "$source_mode" ]; then
+            source_mode="local"
+        fi
+
+        case "$source_mode" in
+            managed|local) ;;
+            *) die "Mode source invalide: $source_mode" ;;
+        esac
+    fi
+
+    if [ -n "$source_dir_override" ]; then
+        source_dir="$source_dir_override"
+        [ -d "$source_dir" ] || die "Source dir introuvable: $source_dir"
+        source_mode="local"
+    elif [ "$source_mode" = "local" ]; then
+        source_dir="$SCRIPT_DIR"
+    else
+        if [ -z "$repo_url" ]; then
+            repo_url="$(detect_origin_url "$SCRIPT_DIR")"
+        fi
+        [ -n "$repo_url" ] || die "repo-url requis pour --source managed."
+        prepare_managed_source "$repo_url" "$track_ref" "$managed_repo_dir"
+        source_dir="$managed_repo_dir"
+    fi
+
+    install_selected_components "$source_dir" "$bin_dir" "$enable_git_alias"
+
+    local previous_ref=""
+    local previous_commit=""
+    local previous_version=""
+    if [ -f "$MANIFEST_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$MANIFEST_FILE"
+        previous_ref="${CURRENT_REF:-}"
+        previous_commit="${CURRENT_COMMIT:-}"
+        previous_version="${CURRENT_VERSION:-}"
+    fi
+
+    local current_ref
+    local current_commit
+    local current_version
+    current_ref="$(git_ref "$source_dir")"
+    current_commit="$(git_commit "$source_dir")"
+    current_version="$(git_version_label "$source_dir")"
+
+    write_manifest_file \
+        "$source_mode" \
+        "$source_dir" \
+        "$managed_repo_dir" \
+        "$repo_url" \
+        "$track_ref" \
+        "$bin_dir" \
+        "$enable_git_alias" \
+        "$current_ref" \
+        "$current_commit" \
+        "$current_version" \
+        "$previous_ref" \
+        "$previous_commit" \
+        "$previous_version"
+
+    echo ""
+    log_ok "Installation terminée."
+    echo "  Scope    : $(scope_label)"
+    echo "  Version  : $current_version"
+    echo "  Commit   : $current_commit"
+    echo "  Bin dir  : $bin_dir"
+    if ! path_contains_dir "$bin_dir"; then
+        log_warn "$bin_dir n'est pas dans votre PATH."
+        echo "Ajoutez dans votre shell profile:"
+        echo "  export PATH=\"$bin_dir:\$PATH\""
+    fi
+}
+
+update_command() {
+    local scope_input=""
+    local action=""
+    local target_ref=""
+    local interactive=1
+    local assume_yes=0
+    local bin_dir_override=""
+    local alias_override=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --scope) scope_input="${2:-}"; shift 2 ;;
+            --latest) action="latest"; shift ;;
+            --version) action="version"; target_ref="${2:-}"; shift 2 ;;
+            --rollback) action="rollback"; shift ;;
+            --reinstall) action="reinstall"; shift ;;
+            --bin-dir) bin_dir_override="${2:-}"; shift 2 ;;
+            --no-git-alias) alias_override="0"; shift ;;
+            --yes) assume_yes=1; shift ;;
+            --non-interactive) interactive=0; shift ;;
+            --help|-h) print_usage; exit 0 ;;
+            *) die "Option inconnue: $1" ;;
+        esac
+    done
+
+    load_manifest_file
+
+    local installed_scope_value=""
+    if [ "$INSTALL_DEPLOYMENT" = "1" ] && [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
+        installed_scope_value="all"
+    elif [ "$INSTALL_DEPLOYMENT" = "1" ]; then
+        installed_scope_value="deployment"
+    elif [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
+        installed_scope_value="git-devops"
+    else
+        die "Le manifeste ne contient aucun scope installé."
+    fi
+
+    if [ -n "$scope_input" ]; then
+        parse_scope_flags "$scope_input"
+        if [ "$SCOPE_DEPLOYMENT" -eq 1 ] && [ "$INSTALL_DEPLOYMENT" != "1" ]; then
+            die "Le scope deployment n'est pas installé. Relancez install avec ce scope."
+        fi
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$INSTALL_GIT_DEVOPS" != "1" ]; then
+            die "Le scope git-devops n'est pas installé. Relancez install avec ce scope."
+        fi
+    else
+        parse_scope_flags "$installed_scope_value"
+    fi
+
+    local bin_dir="$BIN_DIR"
+    if [ -n "$bin_dir_override" ]; then
+        bin_dir="$bin_dir_override"
+    fi
+
+    local enable_git_alias="$ENABLE_GIT_ALIAS"
+    if [ -n "$alias_override" ]; then
+        enable_git_alias="$alias_override"
+    fi
+
+    if [ "$interactive" -eq 1 ]; then
+        echo -e "${COLOR_CYAN}Mise à jour interactive DevOps tooling${COLOR_RESET}"
+
+        if [ -z "$scope_input" ]; then
+            echo ""
+            echo "Scope installé: $installed_scope_value"
+            echo "  1) all"
+            echo "  2) deployment"
+            echo "  3) git-devops"
+            read -r -p "Scope à mettre à jour [1-3] (1): " update_scope_choice
+            update_scope_choice="$(trim "$update_scope_choice")"
+            update_scope_choice="${update_scope_choice:-1}"
+            case "$update_scope_choice" in
+                1) parse_scope_flags "all" ;;
+                2) parse_scope_flags "deployment" ;;
+                3) parse_scope_flags "git-devops" ;;
+                *) die "Choix invalide: $update_scope_choice" ;;
+            esac
+            if [ "$SCOPE_DEPLOYMENT" -eq 1 ] && [ "$INSTALL_DEPLOYMENT" != "1" ]; then
+                die "deployment n'est pas installé."
+            fi
+            if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$INSTALL_GIT_DEVOPS" != "1" ]; then
+                die "git-devops n'est pas installé."
+            fi
+        fi
+
+        if [ -z "$action" ]; then
+            local can_rollback="0"
+            if [ -n "$PREVIOUS_COMMIT" ]; then
+                can_rollback="1"
+            fi
+            action="$(interactive_choose_update_action "$SOURCE_MODE" "$can_rollback")"
+        fi
+
+        if [ "$SOURCE_MODE" != "managed" ] && [ "$action" != "reinstall" ]; then
+            log_warn "Source mode local détecté: action forcée sur reinstall."
+            action="reinstall"
+        fi
+
+        if [ "$action" = "version" ]; then
+            if [ -z "$target_ref" ]; then
+                read -r -p "Ref/tag à installer: " target_ref
+                target_ref="$(trim "$target_ref")"
+            fi
+            [ -n "$target_ref" ] || die "Ref/tag requis pour --version."
+        elif [ "$action" = "latest" ]; then
+            target_ref="${TRACK_REF:-main}"
+        elif [ "$action" = "rollback" ]; then
+            target_ref="${PREVIOUS_COMMIT:-}"
+            [ -n "$target_ref" ] || die "Rollback indisponible: aucune version précédente."
+        fi
+
+        read -r -p "Bin dir [$bin_dir]: " update_bin_input
+        update_bin_input="$(trim "$update_bin_input")"
+        if [ -n "$update_bin_input" ]; then
+            bin_dir="$update_bin_input"
+        fi
+
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+            if ! confirm_yes_no "Rafraîchir l'alias global 'git deploy' ?" "y"; then
+                enable_git_alias="0"
+            fi
+        fi
+
+        if [ "$assume_yes" -eq 0 ]; then
+            echo ""
+            echo "Résumé update:"
+            echo "  Scope      : $(scope_label) ($(scope_list))"
+            echo "  Source mode: $SOURCE_MODE"
+            echo "  Action     : $action"
+            if [ "$action" != "reinstall" ]; then
+                echo "  Target ref : $target_ref"
+            fi
+            echo "  Source dir : $SOURCE_DIR"
+            echo "  Bin dir    : $bin_dir"
+            if ! confirm_yes_no "Continuer la mise à jour ?" "y"; then
+                die "Mise à jour annulée."
+            fi
+        fi
+    else
+        if [ -z "$action" ]; then
+            if [ "$SOURCE_MODE" = "managed" ]; then
+                action="latest"
+            else
+                action="reinstall"
+            fi
+        fi
+
+        if [ "$SOURCE_MODE" != "managed" ] && [ "$action" != "reinstall" ]; then
+            die "Mode local: seules les actions --reinstall sont supportées."
+        fi
+
+        case "$action" in
+            latest) target_ref="${TRACK_REF:-main}" ;;
+            version) [ -n "$target_ref" ] || die "--version requiert une ref/tag." ;;
+            rollback)
+                target_ref="${PREVIOUS_COMMIT:-}"
+                [ -n "$target_ref" ] || die "Rollback indisponible: aucune version précédente."
+                ;;
+            reinstall) ;;
+            *) die "Action update invalide: $action" ;;
+        esac
+    fi
+
+    local source_dir="$SOURCE_DIR"
+    local previous_ref="$CURRENT_REF"
+    local previous_commit="$CURRENT_COMMIT"
+    local previous_version="$CURRENT_VERSION"
+
+    if [ "$SOURCE_MODE" = "managed" ]; then
+        ensure_command git
+        if [ ! -d "$source_dir/.git" ]; then
+            [ -n "$REPO_URL" ] || die "Le dépôt géré est absent et REPO_URL est vide."
+            prepare_managed_source "$REPO_URL" "$TRACK_REF" "$source_dir"
+        fi
+
+        if [ "$action" != "reinstall" ]; then
+            log_info "Changement de ref vers '$target_ref'"
+            checkout_repo_ref "$source_dir" "$target_ref"
+        else
+            log_info "Réinstallation depuis la ref courante."
+        fi
+    else
+        [ -d "$source_dir" ] || die "Source locale introuvable: $source_dir"
+    fi
+
+    install_selected_components "$source_dir" "$bin_dir" "$enable_git_alias"
+
+    local current_ref
+    local current_commit
+    local current_version
+    current_ref="$(git_ref "$source_dir")"
+    current_commit="$(git_commit "$source_dir")"
+    current_version="$(git_version_label "$source_dir")"
+
+    # Réutiliser les scopes installés depuis le manifeste (update peut être partiel)
+    SCOPE_DEPLOYMENT="$INSTALL_DEPLOYMENT"
+    SCOPE_GIT_DEVOPS="$INSTALL_GIT_DEVOPS"
+
+    write_manifest_file \
+        "$SOURCE_MODE" \
+        "$source_dir" \
+        "$MANAGED_REPO_DIR" \
+        "$REPO_URL" \
+        "$TRACK_REF" \
+        "$bin_dir" \
+        "$enable_git_alias" \
+        "$current_ref" \
+        "$current_commit" \
+        "$current_version" \
+        "$previous_ref" \
+        "$previous_commit" \
+        "$previous_version"
+
+    echo ""
+    log_ok "Mise à jour terminée."
+    echo "  Version: $current_version"
+    echo "  Commit : $current_commit"
+    echo "  Scope  : $installed_scope_value"
+    if ! path_contains_dir "$bin_dir"; then
+        log_warn "$bin_dir n'est pas dans votre PATH."
+    fi
+}
+
+uninstall_command() {
+    local scope_input=""
+    local interactive=1
+    local assume_yes=0
+    local remove_managed_source=0
+    local remove_git_alias=0
+    local bin_dir_override=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --scope) scope_input="${2:-}"; shift 2 ;;
+            --remove-managed-source) remove_managed_source=1; shift ;;
+            --remove-git-alias) remove_git_alias=1; shift ;;
+            --bin-dir) bin_dir_override="${2:-}"; shift 2 ;;
+            --yes) assume_yes=1; shift ;;
+            --non-interactive) interactive=0; shift ;;
+            --help|-h) print_usage; exit 0 ;;
+            *) die "Option inconnue: $1" ;;
+        esac
+    done
+
+    load_manifest_file
+
+    local installed_scope_value=""
+    if [ "$INSTALL_DEPLOYMENT" = "1" ] && [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
+        installed_scope_value="all"
+    elif [ "$INSTALL_DEPLOYMENT" = "1" ]; then
+        installed_scope_value="deployment"
+    elif [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
+        installed_scope_value="git-devops"
+    else
+        die "Le manifeste ne contient aucun scope installé."
+    fi
+
+    if [ -n "$scope_input" ]; then
+        parse_scope_flags "$scope_input"
+    else
+        parse_scope_flags "$installed_scope_value"
+    fi
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ] && [ "$INSTALL_DEPLOYMENT" != "1" ]; then
+        die "Le scope deployment n'est pas installé."
+    fi
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$INSTALL_GIT_DEVOPS" != "1" ]; then
+        die "Le scope git-devops n'est pas installé."
+    fi
+
+    local bin_dir="$BIN_DIR"
+    if [ -n "$bin_dir_override" ]; then
+        bin_dir="$bin_dir_override"
+    fi
+
+    local new_install_deployment="$INSTALL_DEPLOYMENT"
+    local new_install_git_devops="$INSTALL_GIT_DEVOPS"
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        new_install_deployment="0"
+    fi
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        new_install_git_devops="0"
+    fi
+
+    if [ "$interactive" -eq 1 ]; then
+        echo -e "${COLOR_CYAN}Désinstallation interactive DevOps tooling${COLOR_RESET}"
+        echo "  Scope à retirer : $(scope_label) ($(scope_list))"
+        echo "  Bin dir         : $bin_dir"
+
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$remove_git_alias" -eq 0 ]; then
+            if confirm_yes_no "Supprimer aussi l'alias global 'git deploy' ?" "y"; then
+                remove_git_alias=1
+            fi
+        fi
+
+        if [ "$SOURCE_MODE" = "managed" ] && [ "$new_install_deployment" = "0" ] && [ "$new_install_git_devops" = "0" ] && [ "$remove_managed_source" -eq 0 ]; then
+            if confirm_yes_no "Supprimer aussi le dossier source managed '$MANAGED_REPO_DIR' ?" "n"; then
+                remove_managed_source=1
+            fi
+        fi
+
+        if [ "$assume_yes" -eq 0 ]; then
+            echo ""
+            echo "Résumé uninstall:"
+            echo "  Remove scope         : $(scope_label)"
+            echo "  Remove git alias     : $remove_git_alias"
+            echo "  Remove managed source: $remove_managed_source"
+            if ! confirm_yes_no "Continuer la désinstallation ?" "y"; then
+                die "Désinstallation annulée."
+            fi
+        fi
+    fi
+
+    if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
+        remove_command_entry "$bin_dir/devops" "deployment" "$interactive" "$assume_yes"
+    fi
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+        remove_command_entry "$bin_dir/git-deploy" "git-devops" "$interactive" "$assume_yes"
+    fi
+
+    if [ "$remove_git_alias" -eq 1 ]; then
+        remove_git_alias_deploy
+    fi
+
+    if [ "$new_install_deployment" = "0" ] && [ "$new_install_git_devops" = "0" ]; then
+        rm -f "$MANIFEST_FILE"
+        rmdir "$STATE_DIR" 2>/dev/null || true
+        log_ok "Manifeste supprimé: $MANIFEST_FILE"
+
+        if [ "$remove_managed_source" -eq 1 ] && [ "$SOURCE_MODE" = "managed" ]; then
+            remove_managed_source_directory "$MANAGED_REPO_DIR"
+        fi
+
+        log_ok "Désinstallation totale terminée."
+        return
+    fi
+
+    local current_ref="$CURRENT_REF"
+    local current_commit="$CURRENT_COMMIT"
+    local current_version="$CURRENT_VERSION"
+    if [ -d "$SOURCE_DIR" ]; then
+        current_ref="$(git_ref "$SOURCE_DIR")"
+        current_commit="$(git_commit "$SOURCE_DIR")"
+        current_version="$(git_version_label "$SOURCE_DIR")"
+    fi
+
+    SCOPE_DEPLOYMENT="$new_install_deployment"
+    SCOPE_GIT_DEVOPS="$new_install_git_devops"
+    write_manifest_file \
+        "$SOURCE_MODE" \
+        "$SOURCE_DIR" \
+        "$MANAGED_REPO_DIR" \
+        "$REPO_URL" \
+        "$TRACK_REF" \
+        "$bin_dir" \
+        "$ENABLE_GIT_ALIAS" \
+        "$current_ref" \
+        "$current_commit" \
+        "$current_version" \
+        "$PREVIOUS_REF" \
+        "$PREVIOUS_COMMIT" \
+        "$PREVIOUS_VERSION"
+
+    log_ok "Désinstallation partielle terminée."
+}
+
+status_command() {
+    if [ ! -f "$MANIFEST_FILE" ]; then
+        echo "Aucune installation détectée."
+        echo "Lancez ./install.sh"
+        return
+    fi
+
+    load_manifest_file
+
+    echo "Installation DevOps tooling"
+    echo "  Manifest       : $MANIFEST_FILE"
+    echo "  Installé le    : ${INSTALLED_AT:-unknown}"
+    echo "  Source mode    : $SOURCE_MODE"
+    echo "  Source dir     : $SOURCE_DIR"
+    echo "  Managed dir    : $MANAGED_REPO_DIR"
+    echo "  Repo URL       : $REPO_URL"
+    echo "  Track ref      : $TRACK_REF"
+    echo "  Scope          : $( \
+        if [ "$INSTALL_DEPLOYMENT" = "1" ] && [ "$INSTALL_GIT_DEVOPS" = "1" ]; then echo "all"; \
+        elif [ "$INSTALL_DEPLOYMENT" = "1" ]; then echo "deployment"; \
+        else echo "git-devops"; fi \
+    )"
+    echo "  Bin dir        : $BIN_DIR"
+    echo "  Git alias      : $ENABLE_GIT_ALIAS"
+    echo "  Current ref    : $CURRENT_REF"
+    echo "  Current commit : $CURRENT_COMMIT"
+    echo "  Current version: $CURRENT_VERSION"
+    echo "  Previous ref   : ${PREVIOUS_REF:-n/a}"
+    echo "  Previous commit: ${PREVIOUS_COMMIT:-n/a}"
+    echo "  Previous ver.  : ${PREVIOUS_VERSION:-n/a}"
+
+    if [ "$INSTALL_DEPLOYMENT" = "1" ]; then
+        echo "  devops cmd     : $(command -v devops 2>/dev/null || echo 'not found in PATH')"
+    fi
+    if [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
+        echo "  git-deploy cmd : $(command -v git-deploy 2>/dev/null || echo 'not found in PATH')"
+    fi
+}
+
+main() {
+    local command="${1:-}"
+
+    case "$command" in
+        install)
+            shift
+            install_command "$@"
+            ;;
+        update)
+            shift
+            update_command "$@"
+            ;;
+        uninstall)
+            shift
+            uninstall_command "$@"
+            ;;
+        status)
+            shift
+            status_command "$@"
+            ;;
+        help|-h|--help|"")
+            print_usage
+            ;;
+        *)
+            die "Commande inconnue: $command (attendu: install|update|uninstall|status)"
+            ;;
+    esac
+}
+
+main "$@"
