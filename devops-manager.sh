@@ -557,10 +557,10 @@ interactive_choose_scope() {
 
 interactive_choose_source_mode() {
     local choice=""
-    echo ""
-    echo "Mode source :"
-    echo "  1) managed (recommandé: clone dans ~/.local/share, update simple)"
-    echo "  2) local (utilise ce checkout actuel)"
+    echo "" >&2
+    echo "Mode source :" >&2
+    echo "  1) managed (recommandé: clone dans ~/.local/share, update simple)" >&2
+    echo "  2) local (utilise ce checkout actuel)" >&2
     read -r -p "Choix [1-2] (1): " choice
     choice="$(trim "$choice")"
     choice="${choice:-1}"
@@ -582,13 +582,13 @@ interactive_choose_update_action() {
         return
     fi
 
-    echo ""
-    echo "Action de mise à jour :"
-    echo "  1) latest   (met à jour TRACK_REF)"
-    echo "  2) version  (tag/ref spécifique)"
+    echo "" >&2
+    echo "Action de mise à jour :" >&2
+    echo "  1) latest   (met à jour TRACK_REF)" >&2
+    echo "  2) version  (tag/ref spécifique)" >&2
     if [ "$can_rollback" = "1" ]; then
-        echo "  3) rollback (revient au commit précédent)"
-        echo "  4) reinstall (sans changer de ref)"
+        echo "  3) rollback (revient au commit précédent)" >&2
+        echo "  4) reinstall (sans changer de ref)" >&2
         read -r -p "Choix [1-4] (1): " choice
         choice="$(trim "$choice")"
         choice="${choice:-1}"
@@ -602,7 +602,7 @@ interactive_choose_update_action() {
         return
     fi
 
-    echo "  3) reinstall (sans changer de ref)"
+    echo "  3) reinstall (sans changer de ref)" >&2
     read -r -p "Choix [1-3] (1): " choice
     choice="$(trim "$choice")"
     choice="${choice:-1}"
