@@ -66,7 +66,8 @@ Options pour update:
 Options pour uninstall:
   --scope <all|deployment|git-devops|deployment,git-devops>
   --remove-managed-source          (supprime le clone managed si plus aucun scope installe)
-  --remove-git-alias               (supprime l'alias global git deploy)
+  --remove-git-alias               (force la suppression de l'alias global git deploy)
+  --keep-git-alias                 (conserve l'alias global git deploy)
   --bin-dir <path>                 (surcharge le dossier de commandes)
   --yes                            (accepter automatiquement les confirmations)
   --non-interactive
@@ -77,6 +78,7 @@ Exemples:
   ./devops-manager.sh install --scope all --source managed --ref main
   ./devops-manager.sh update --latest
   ./devops-manager.sh uninstall --scope git-devops
+  ./devops-manager.sh uninstall --scope all --keep-git-alias
 EOF
 }
 
@@ -781,10 +783,8 @@ install_command() {
             bin_dir="$input_bin"
         fi
 
-        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
-            if ! confirm_yes_no "Configurer/mettre à jour l'alias global 'git deploy' ?" "y"; then
-                enable_git_alias="0"
-            fi
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$enable_git_alias" = "1" ]; then
+            log_info "Alias global 'git deploy' sera configuré automatiquement."
         fi
 
         if [ "$assume_yes" -eq 0 ]; then
@@ -1001,10 +1001,8 @@ update_command() {
             bin_dir="$update_bin_input"
         fi
 
-        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
-            if ! confirm_yes_no "Rafraîchir l'alias global 'git deploy' ?" "y"; then
-                enable_git_alias="0"
-            fi
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$enable_git_alias" = "1" ]; then
+            log_info "Alias global 'git deploy' sera rafraîchi automatiquement."
         fi
 
         if [ "$assume_yes" -eq 0 ]; then
@@ -1113,6 +1111,7 @@ uninstall_command() {
     local assume_yes=0
     local remove_managed_source=0
     local remove_git_alias=0
+    local keep_git_alias=0
     local bin_dir_override=""
 
     while [ $# -gt 0 ]; do
@@ -1120,6 +1119,7 @@ uninstall_command() {
             --scope) scope_input="${2:-}"; shift 2 ;;
             --remove-managed-source) remove_managed_source=1; shift ;;
             --remove-git-alias) remove_git_alias=1; shift ;;
+            --keep-git-alias) keep_git_alias=1; shift ;;
             --bin-dir) bin_dir_override="${2:-}"; shift 2 ;;
             --yes) assume_yes=1; shift ;;
             --non-interactive) interactive=0; shift ;;
@@ -1153,6 +1153,9 @@ uninstall_command() {
     if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$INSTALL_GIT_DEVOPS" != "1" ]; then
         die "Le scope git-devops n'est pas installé."
     fi
+    if [ "$remove_git_alias" -eq 1 ] && [ "$keep_git_alias" -eq 1 ]; then
+        die "Options incompatibles: --remove-git-alias et --keep-git-alias."
+    fi
 
     local bin_dir="$BIN_DIR"
     if [ -n "$bin_dir_override" ]; then
@@ -1169,14 +1172,20 @@ uninstall_command() {
         new_install_git_devops="0"
     fi
 
+    # Comportement par défaut: si on retire git-devops, on retire aussi l'alias.
+    if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$keep_git_alias" -eq 0 ]; then
+        remove_git_alias=1
+    fi
+
     if [ "$interactive" -eq 1 ]; then
         echo -e "${COLOR_CYAN}Désinstallation interactive DevOps tooling${COLOR_RESET}"
         echo "  Scope à retirer : $(scope_label) ($(scope_list))"
         echo "  Bin dir         : $bin_dir"
-
-        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ] && [ "$remove_git_alias" -eq 0 ]; then
-            if confirm_yes_no "Supprimer aussi l'alias global 'git deploy' ?" "y"; then
-                remove_git_alias=1
+        if [ "$SCOPE_GIT_DEVOPS" -eq 1 ]; then
+            if [ "$keep_git_alias" -eq 1 ]; then
+                log_info "Alias global 'git deploy' conservé (option --keep-git-alias)."
+            else
+                log_info "Alias global 'git deploy' sera supprimé automatiquement."
             fi
         fi
 
