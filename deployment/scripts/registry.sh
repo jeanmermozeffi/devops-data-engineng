@@ -156,10 +156,10 @@ platform_number_to_value() {
 platform_description() {
     local platform="$1"
     case "$platform" in
-        linux/amd64) echo "x86_64 - serveurs/cloud (le plus rapide à builder)" ;;
-        linux/arm64) echo "ARM 64-bit - Graviton, Apple Silicon, Raspberry Pi 64-bit" ;;
+        linux/amd64) echo "x86_64 - Ubuntu/Debian classiques, serveurs cloud, Windows via Docker Desktop/WSL2" ;;
+        linux/arm64) echo "ARM 64-bit - macOS Apple Silicon (M1/M2/M3), Graviton AWS, Ubuntu ARM64" ;;
         linux/arm/v7) echo "ARM 32-bit v7 - Raspberry Pi 2/3, IoT" ;;
-        linux/arm/v6) echo "ARM 32-bit v6 - anciens Raspberry Pi/IoT legacy" ;;
+        linux/arm/v6) echo "ARM 32-bit v6 - anciens Raspberry Pi / IoT legacy" ;;
         *) echo "plateforme personnalisée" ;;
     esac
 }
@@ -242,10 +242,10 @@ choose_multiarch_platforms() {
 
     echo "" >&2
     echo -e "${CYAN}Sélection des plateformes Buildx:${NC}" >&2
-    echo "  1) linux/amd64          (x86_64, build le plus rapide)" >&2
-    echo "  2) linux/arm64          (ARM64)" >&2
-    echo "  3) linux/arm/v7         (ARM 32-bit v7)" >&2
-    echo "  4) linux/arm/v6         (ARM 32-bit v6, legacy)" >&2
+    echo "  1) linux/amd64          (Ubuntu x86_64, serveurs cloud, Windows via WSL2)" >&2
+    echo "  2) linux/arm64          (macOS Apple Silicon, Graviton, Ubuntu ARM64)" >&2
+    echo "  3) linux/arm/v7         (Raspberry Pi 2/3, IoT)" >&2
+    echo "  4) linux/arm/v6         (anciens Raspberry Pi, legacy)" >&2
     echo "" >&2
     echo -e "${CYAN}Combinaisons recommandées:${NC}" >&2
     echo "  5) 1+2                  (standard: amd64 + arm64)" >&2
@@ -253,6 +253,9 @@ choose_multiarch_platforms() {
     echo "  7) 1+2+3+4              (complet: le plus lent)" >&2
     echo "  8) Combinaison personnalisée (ex: 1,3)" >&2
     echo "  9) Garder la config actuelle (${default_platforms})" >&2
+    echo "" >&2
+    echo -e "${YELLOW}Note:${NC} ces plateformes ciblent des images Linux." >&2
+    echo -e "      Sous Windows, utilisez Docker Desktop en mode Linux containers (WSL2)." >&2
     echo "" >&2
     read -p "Choisissez une option (1-9, Entrée=9): " choice
     choice=${choice:-9}
