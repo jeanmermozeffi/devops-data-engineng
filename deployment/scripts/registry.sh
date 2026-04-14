@@ -1513,8 +1513,6 @@ cmd_build_push_multiarch() {
         exit 1
     fi
 
-    registry_login
-
     # Déterminer le mode build (clone ou local)
     local build_mode="local"
     if [ "$use_git" == "true" ]; then
@@ -1580,6 +1578,9 @@ cmd_build_push_multiarch() {
     log_info "Mode: Build multi-architecture ($build_platforms)"
     log_info "Push direct vers registry (pas de chargement local)"
     log_selected_platforms "$build_platforms"
+
+    # Connexion registry après la sélection des plateformes pour une meilleure UX interactive
+    registry_login
 
     # Créer ou utiliser un builder buildx
     local buildx_builder="devops-builder"
