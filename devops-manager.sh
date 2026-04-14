@@ -48,6 +48,9 @@ Options pour install:
   --non-interactive
   --help
 
+Commande globale exposee:
+  devops-manager                   (lance le menu interactif)
+
 Options pour update:
   --scope <all|deployment|git-devops|deployment,git-devops>
   --latest                         (mode managed uniquement; defaut en non-interactif)
@@ -359,6 +362,8 @@ prepare_managed_source() {
 validate_source_for_scope() {
     local source_dir="$1"
 
+    [ -f "$source_dir/devops-manager.sh" ] || die "Fichier introuvable: $source_dir/devops-manager.sh"
+
     if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
         [ -f "$source_dir/deployment/devops" ] || die "Fichier introuvable: $source_dir/deployment/devops"
     fi
@@ -392,6 +397,18 @@ install_git_deploy_cli() {
     log_ok "Commande installée: $target_file -> $source_file"
 }
 
+install_manager_cli() {
+    local source_dir="$1"
+    local bin_dir="$2"
+    local source_file="$source_dir/devops-manager.sh"
+    local target_file="$bin_dir/devops-manager"
+
+    mkdir -p "$bin_dir"
+    chmod +x "$source_file" || true
+    ln -sfn "$source_file" "$target_file"
+    log_ok "Commande installée: $target_file -> $source_file"
+}
+
 configure_git_alias() {
     local enable_alias="$1"
     if [ "$enable_alias" != "1" ]; then
@@ -417,6 +434,7 @@ install_selected_components() {
     local enable_alias="$3"
 
     validate_source_for_scope "$source_dir"
+    install_manager_cli "$source_dir" "$bin_dir"
 
     if [ "$SCOPE_DEPLOYMENT" -eq 1 ]; then
         install_deployment_cli "$source_dir" "$bin_dir"
@@ -490,6 +508,47 @@ remove_managed_source_directory() {
 
     rm -rf "$managed_repo_dir"
     log_ok "Dossier source managed supprimé: $managed_repo_dir"
+}
+
+check_managed_updates() {
+    local repo_dir="$1"
+    local track_ref="$2"
+    local show_up_to_date="${3:-0}"
+    local local_commit=""
+    local remote_commit=""
+
+    if [ ! -d "$repo_dir/.git" ]; then
+        log_warn "Dépôt managed introuvable: $repo_dir"
+        return
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        return
+    fi
+
+    if ! git -C "$repo_dir" fetch --quiet origin "$track_ref" --tags 2>/dev/null; then
+        log_warn "Impossible de verifier les mises a jour distantes pour '$track_ref'."
+        return
+    fi
+
+    local_commit="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
+    remote_commit="$(git -C "$repo_dir" rev-parse "origin/$track_ref" 2>/dev/null || true)"
+
+    if [ -z "$local_commit" ] || [ -z "$remote_commit" ]; then
+        return
+    fi
+
+    if [ "$local_commit" != "$remote_commit" ]; then
+        log_warn "Mise a jour disponible pour la ref '$track_ref'."
+        echo "  Local  : ${local_commit:0:7}"
+        echo "  Distant: ${remote_commit:0:7}"
+        echo "  Lancez : devops-manager update --latest"
+        return
+    fi
+
+    if [ "$show_up_to_date" = "1" ]; then
+        log_ok "Vous etes a jour sur '$track_ref' (${local_commit:0:7})."
+    fi
 }
 
 manifest_write_var() {
@@ -1151,6 +1210,7 @@ uninstall_command() {
     fi
 
     if [ "$new_install_deployment" = "0" ] && [ "$new_install_git_devops" = "0" ]; then
+        remove_command_entry "$bin_dir/devops-manager" "manager" "$interactive" "$assume_yes"
         rm -f "$MANIFEST_FILE"
         rmdir "$STATE_DIR" 2>/dev/null || true
         log_ok "Manifeste supprimé: $MANIFEST_FILE"
@@ -1222,6 +1282,7 @@ status_command() {
     echo "  Previous ref   : ${PREVIOUS_REF:-n/a}"
     echo "  Previous commit: ${PREVIOUS_COMMIT:-n/a}"
     echo "  Previous ver.  : ${PREVIOUS_VERSION:-n/a}"
+    echo "  manager cmd    : $(command -v devops-manager 2>/dev/null || echo 'introuvable dans le PATH')"
 
     if [ "$INSTALL_DEPLOYMENT" = "1" ]; then
         echo "  devops cmd     : $(command -v devops 2>/dev/null || echo 'introuvable dans le PATH')"
@@ -1229,11 +1290,22 @@ status_command() {
     if [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
         echo "  git-deploy cmd : $(command -v git-deploy 2>/dev/null || echo 'introuvable dans le PATH')"
     fi
+
+    if [ "$SOURCE_MODE" = "managed" ]; then
+        check_managed_updates "$SOURCE_DIR" "$TRACK_REF" "1"
+    fi
 }
 
 interactive_main_menu() {
     local choice=""
     local lowered=""
+
+    if [ -f "$MANIFEST_FILE" ]; then
+        load_manifest_file
+        if [ "${SOURCE_MODE:-}" = "managed" ]; then
+            check_managed_updates "$SOURCE_DIR" "$TRACK_REF" "0"
+        fi
+    fi
 
     echo ""
     echo -e "${COLOR_CYAN}Gestionnaire DevOps - Menu interactif${COLOR_RESET}"
