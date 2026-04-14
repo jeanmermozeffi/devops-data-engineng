@@ -25,46 +25,55 @@ SCOPE_GIT_DEVOPS=0
 print_usage() {
     cat <<'EOF'
 Usage:
-  ./devops-manager.sh install [options]
-  ./devops-manager.sh update [options]
-  ./devops-manager.sh uninstall [options]
-  ./devops-manager.sh status
+  ./devops-manager.sh [commande] [options]
 
-Install options:
+Commandes:
+  install     Installer un ou plusieurs composants (deployment, git-devops)
+  update      Mettre a jour l'installation existante
+  uninstall   Desinstaller partiellement ou totalement
+  status      Afficher l'etat de l'installation
+  help        Afficher cette aide
+
+Sans commande, le script ouvre un menu interactif.
+
+Options pour install:
   --scope <all|deployment|git-devops|deployment,git-devops>
-  --source <managed|local>         (default: managed in interactive mode, local in non-interactive mode)
-  --repo-url <url>                 (required for --source managed if not detectable)
-  --ref <branch-or-tag>            (default: main, tracked ref for updates)
-  --managed-dir <path>             (default: ~/.local/share/devops-enginering/repo)
-  --bin-dir <path>                 (default: ~/.local/bin or ~/bin)
-  --no-git-alias                   (skip git alias: git deploy)
-  --yes                            (skip confirmation prompts)
+  --source <managed|local>         (defaut: managed en interactif, local en non-interactif)
+  --repo-url <url>                 (requis si --source managed et URL non detectable)
+  --ref <branch-or-tag>            (defaut: main, ref suivie pour les updates)
+  --managed-dir <path>             (defaut: ~/.local/share/devops-enginering/repo)
+  --bin-dir <path>                 (defaut: ~/.local/bin ou ~/bin)
+  --no-git-alias                   (ne pas configurer l'alias git deploy)
+  --yes                            (accepter automatiquement les confirmations)
   --non-interactive
   --help
 
-Update options:
+Options pour update:
   --scope <all|deployment|git-devops|deployment,git-devops>
-  --latest                         (managed source only; default in non-interactive mode)
-  --version <tag-or-ref>           (managed source only)
-  --rollback                       (managed source only; uses previous commit)
-  --reinstall                      (re-link current source without changing git ref)
-  --bin-dir <path>                 (override bin dir for this update)
-  --no-git-alias                   (skip git alias refresh)
-  --yes                            (skip confirmation prompts)
+  --latest                         (mode managed uniquement; defaut en non-interactif)
+  --version <tag-or-ref>           (mode managed uniquement)
+  --rollback                       (mode managed uniquement; revient a la version precedente)
+  --reinstall                      (recree les liens sans changer de ref)
+  --bin-dir <path>                 (surcharge le dossier de commandes)
+  --no-git-alias                   (ne pas rafraichir l'alias git deploy)
+  --yes                            (accepter automatiquement les confirmations)
   --non-interactive
   --help
 
-Status:
-  ./devops-manager.sh status
-
-Uninstall options:
+Options pour uninstall:
   --scope <all|deployment|git-devops|deployment,git-devops>
-  --remove-managed-source          (if source mode is managed and no scope remains)
-  --remove-git-alias              (remove global alias: git deploy)
-  --bin-dir <path>                (override bin dir if needed)
-  --yes                           (skip confirmation prompts)
+  --remove-managed-source          (supprime le clone managed si plus aucun scope installe)
+  --remove-git-alias               (supprime l'alias global git deploy)
+  --bin-dir <path>                 (surcharge le dossier de commandes)
+  --yes                            (accepter automatiquement les confirmations)
   --non-interactive
   --help
+
+Exemples:
+  ./devops-manager.sh
+  ./devops-manager.sh install --scope all --source managed --ref main
+  ./devops-manager.sh update --latest
+  ./devops-manager.sh uninstall --scope git-devops
 EOF
 }
 
@@ -1196,15 +1205,76 @@ status_command() {
     echo "  Previous ver.  : ${PREVIOUS_VERSION:-n/a}"
 
     if [ "$INSTALL_DEPLOYMENT" = "1" ]; then
-        echo "  devops cmd     : $(command -v devops 2>/dev/null || echo 'not found in PATH')"
+        echo "  devops cmd     : $(command -v devops 2>/dev/null || echo 'introuvable dans le PATH')"
     fi
     if [ "$INSTALL_GIT_DEVOPS" = "1" ]; then
-        echo "  git-deploy cmd : $(command -v git-deploy 2>/dev/null || echo 'not found in PATH')"
+        echo "  git-deploy cmd : $(command -v git-deploy 2>/dev/null || echo 'introuvable dans le PATH')"
     fi
+}
+
+interactive_main_menu() {
+    local choice=""
+    local lowered=""
+
+    echo ""
+    echo -e "${COLOR_CYAN}Gestionnaire DevOps - Menu interactif${COLOR_RESET}"
+    echo "Choisissez une action:"
+    echo "  1) Installer"
+    echo "  2) Mettre a jour"
+    echo "  3) Desinstaller"
+    echo "  4) Voir le statut"
+    echo "  5) Afficher l'aide"
+    echo "  0) Quitter"
+
+    while true; do
+        read -r -p "Choix [0-5] (1): " choice
+        choice="$(trim "$choice")"
+        choice="${choice:-1}"
+        lowered="$(printf "%s" "$choice" | tr '[:upper:]' '[:lower:]')"
+
+        case "$lowered" in
+            1)
+                install_command
+                return
+                ;;
+            2)
+                update_command
+                return
+                ;;
+            3)
+                uninstall_command
+                return
+                ;;
+            4)
+                status_command
+                return
+                ;;
+            5|h|help|aide)
+                print_usage
+                return
+                ;;
+            0|q|quit|exit)
+                echo "Sortie."
+                return
+                ;;
+            *)
+                log_warn "Choix invalide: $choice"
+                ;;
+        esac
+    done
 }
 
 main() {
     local command="${1:-}"
+
+    if [ -z "$command" ]; then
+        if [ -t 0 ]; then
+            interactive_main_menu
+        else
+            print_usage
+        fi
+        return
+    fi
 
     case "$command" in
         install)
@@ -1223,7 +1293,7 @@ main() {
             shift
             status_command "$@"
             ;;
-        help|-h|--help|"")
+        help|-h|--help)
             print_usage
             ;;
         *)
