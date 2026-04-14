@@ -904,10 +904,23 @@ else
 fi
 
 echo "Démarrage de db-rh..."
-docker compose -f "$PROJECT_DIR/docker-compose.rh.yml" up -d db-rh
+if docker ps -a --format '{{.Names}}' | grep -qx "superset_db_rh"; then
+  if docker ps --format '{{.Names}}' | grep -qx "superset_db_rh"; then
+    echo "Conteneur superset_db_rh déjà démarré."
+  else
+    docker start superset_db_rh >/dev/null
+    echo "Conteneur superset_db_rh redémarré."
+  fi
+else
+  docker compose -f "$PROJECT_DIR/docker-compose.rh.yml" up -d db-rh
+fi
 
 echo ""
-docker compose -f "$PROJECT_DIR/docker-compose.rh.yml" ps db-rh
+if docker ps --format '{{.Names}}' | grep -qx "superset_db_rh"; then
+  docker ps --filter "name=^superset_db_rh$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+else
+  echo "Aucun conteneur superset_db_rh en cours d'execution."
+fi
 echo ""
 echo "Base RH démarrée."
 EOF
