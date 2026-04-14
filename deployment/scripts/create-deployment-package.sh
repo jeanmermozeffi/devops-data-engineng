@@ -917,7 +917,7 @@ fi
 
 echo ""
 if docker ps --format '{{.Names}}' | grep -qx "superset_db_rh"; then
-  docker ps --filter "name=^superset_db_rh$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  docker ps --filter "name=superset_db_rh" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 else
   echo "Aucun conteneur superset_db_rh en cours d'execution."
 fi
