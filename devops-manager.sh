@@ -313,6 +313,7 @@ prepare_managed_source() {
     local repo_url="$1"
     local track_ref="$2"
     local managed_repo_dir="$3"
+    local interactive_mode="${4:-0}"
 
     ensure_command git
     [ -n "$repo_url" ] || die "URL du dépôt requise pour le mode managed."
@@ -321,10 +322,28 @@ prepare_managed_source() {
 
     if [ -d "$managed_repo_dir/.git" ]; then
         local current_remote=""
+        local dirty_state=""
         current_remote="$(git -C "$managed_repo_dir" remote get-url origin 2>/dev/null || true)"
         if [ -n "$current_remote" ] && [ "$current_remote" != "$repo_url" ]; then
             die "Le dépôt géré existant utilise '$current_remote'. Choisissez un autre --managed-dir ou alignez --repo-url."
         fi
+
+        dirty_state="$(git -C "$managed_repo_dir" status --porcelain --untracked-files=all)"
+        if [ -n "$dirty_state" ]; then
+            log_warn "Le dépôt managed contient des modifications locales: $managed_repo_dir"
+            if [ "$interactive_mode" = "1" ]; then
+                if confirm_yes_no "Créer un stash automatique avant de changer de branche ?" "y"; then
+                    local stash_name="devops-manager-autostash-$(date +%Y%m%d-%H%M%S)"
+                    git -C "$managed_repo_dir" stash push -u -m "$stash_name" >/dev/null
+                    log_ok "Modifications locales stashées: $stash_name"
+                else
+                    die "Opération annulée. Exécutez: git -C \"$managed_repo_dir\" stash -u"
+                fi
+            else
+                die "Dépôt managed non propre. Exécutez: git -C \"$managed_repo_dir\" stash -u"
+            fi
+        fi
+
         log_info "Mise à jour du dépôt géré dans $managed_repo_dir"
         git -C "$managed_repo_dir" fetch --tags --prune origin
     elif [ -e "$managed_repo_dir" ]; then
@@ -753,7 +772,7 @@ install_command() {
             repo_url="$(detect_origin_url "$SCRIPT_DIR")"
         fi
         [ -n "$repo_url" ] || die "repo-url requis pour --source managed."
-        prepare_managed_source "$repo_url" "$track_ref" "$managed_repo_dir"
+        prepare_managed_source "$repo_url" "$track_ref" "$managed_repo_dir" "$interactive"
         source_dir="$managed_repo_dir"
     fi
 
@@ -978,7 +997,7 @@ update_command() {
         ensure_command git
         if [ ! -d "$source_dir/.git" ]; then
             [ -n "$REPO_URL" ] || die "Le dépôt géré est absent et REPO_URL est vide."
-            prepare_managed_source "$REPO_URL" "$TRACK_REF" "$source_dir"
+            prepare_managed_source "$REPO_URL" "$TRACK_REF" "$source_dir" "$interactive"
         fi
 
         if [ "$action" != "reinstall" ]; then
