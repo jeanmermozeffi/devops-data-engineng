@@ -831,9 +831,10 @@ create_package() {
 
     # Inclure le compose RH (base de donnees test) uniquement pour les stacks Superset
     if [ "${STACK_TYPE}" = "reporting-superset" ] || [ "${STACK_TYPE}" = "superset" ]; then
-        RH_SOURCE_DIRS=("$PROJECT_DIR")
+        RH_SOURCE_DIRS=("$COMPOSE_SRC" "$PROJECT_DIR")
         if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
             RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
+            RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR/$DEPLOYMENT_SUBDIR")
         fi
 
         RH_COMPOSE_SRC=""
@@ -845,9 +846,8 @@ create_package() {
         done
 
         if [ -n "$RH_COMPOSE_SRC" ]; then
-            mkdir -p "$PACKAGE_DIR/docker"
-            cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker/"
-            log_success "✓ docker/docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
+            cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker-compose.rh.yml"
+            log_success "✓ docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
 
             RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
             if [ ! -d "$RH_SQL_SRC_DIR" ]; then
@@ -864,7 +864,7 @@ create_package() {
                 exit 1
             fi
         else
-            log_warn "⚠️  docker-compose.rh.yml non trouvé (PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
+            log_warn "⚠️  docker-compose.rh.yml non trouvé (deployment/, PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
         fi
     else
         log_info "Compose RH ignoré (stack_type=${STACK_TYPE:-non défini}, requis: reporting-superset)"
