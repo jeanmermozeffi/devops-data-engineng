@@ -712,6 +712,9 @@ create_package() {
     for compose_file in "$PACKAGE_DIR"/docker-compose*.yml; do
         if [ -f "$compose_file" ]; then
             sed_inplace 's|\.\./|./|g' "$compose_file"
+            # Cas particulier: certains compose utilisent "context: .." (sans slash).
+            # Dans le package, le contexte de build doit pointer sur la racine du package.
+            sed_inplace 's|^\([[:space:]]*context:[[:space:]]*\)\.\.$|\1.|g' "$compose_file"
         fi
     done
 
