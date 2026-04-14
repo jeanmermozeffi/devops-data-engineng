@@ -240,20 +240,20 @@ choose_multiarch_platforms() {
     local choice=""
     local selected=""
 
-    echo ""
-    echo -e "${CYAN}Sélection des plateformes Buildx:${NC}"
-    echo "  1) linux/amd64          (x86_64, build le plus rapide)"
-    echo "  2) linux/arm64          (ARM64)"
-    echo "  3) linux/arm/v7         (ARM 32-bit v7)"
-    echo "  4) linux/arm/v6         (ARM 32-bit v6, legacy)"
-    echo ""
-    echo -e "${CYAN}Combinaisons recommandées:${NC}"
-    echo "  5) 1+2                  (standard: amd64 + arm64)"
-    echo "  6) 1+2+3                (étendu: amd64 + arm64 + arm/v7)"
-    echo "  7) 1+2+3+4              (complet: le plus lent)"
-    echo "  8) Combinaison personnalisée (ex: 1,3)"
-    echo "  9) Garder la config actuelle (${default_platforms})"
-    echo ""
+    echo "" >&2
+    echo -e "${CYAN}Sélection des plateformes Buildx:${NC}" >&2
+    echo "  1) linux/amd64          (x86_64, build le plus rapide)" >&2
+    echo "  2) linux/arm64          (ARM64)" >&2
+    echo "  3) linux/arm/v7         (ARM 32-bit v7)" >&2
+    echo "  4) linux/arm/v6         (ARM 32-bit v6, legacy)" >&2
+    echo "" >&2
+    echo -e "${CYAN}Combinaisons recommandées:${NC}" >&2
+    echo "  5) 1+2                  (standard: amd64 + arm64)" >&2
+    echo "  6) 1+2+3                (étendu: amd64 + arm64 + arm/v7)" >&2
+    echo "  7) 1+2+3+4              (complet: le plus lent)" >&2
+    echo "  8) Combinaison personnalisée (ex: 1,3)" >&2
+    echo "  9) Garder la config actuelle (${default_platforms})" >&2
+    echo "" >&2
     read -p "Choisissez une option (1-9, Entrée=9): " choice
     choice=${choice:-9}
 
