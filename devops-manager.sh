@@ -3,7 +3,14 @@
 set -euo pipefail
 
 APP_ID="devops-enginering"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+# Résoudre les symlinks pour obtenir le vrai répertoire du script
+while [ -L "$SCRIPT_PATH" ]; do
+    RESOLVED_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$RESOLVED_DIR/$SCRIPT_PATH"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/${APP_ID}"
 MANIFEST_FILE="${STATE_DIR}/install.env"
