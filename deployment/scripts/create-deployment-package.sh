@@ -721,6 +721,18 @@ create_package() {
         log_info "Aucune ressource locale détectée (images officielles uniquement)"
     fi
 
+    # Garde-fou: ne jamais livrer un package Superset avec des chemins ../config ou ../exports.
+    # Sinon Docker crée des dossiers hors projet sur le serveur (ex: /srv/home/config, /srv/home/exports).
+    if ls "$PACKAGE_DIR"/docker-compose*.yml >/dev/null 2>&1; then
+        if grep -R -nE '\.\./config/|\.\./exports' "$PACKAGE_DIR"/docker-compose*.yml >/dev/null 2>&1; then
+            log_error "❌ Le package contient encore des chemins relatifs '../config' ou '../exports' dans les compose."
+            log_error "   Cela créerait des dossiers hors projet sur le serveur."
+            log_info "   Fichiers concernés:"
+            grep -R -nE '\.\./config/|\.\./exports' "$PACKAGE_DIR"/docker-compose*.yml || true
+            exit 1
+        fi
+    fi
+
     # Copier superset_config.py uniquement pour les stacks Superset
     # (évite le cas où Docker crée un dossier config/superset_config.py si le fichier manque)
     if [ "${INCLUDE_SUPERSET_ASSETS}" != "false" ]; then
@@ -832,9 +844,9 @@ create_package() {
     # Inclure le compose RH (base de donnees test) uniquement pour les stacks Superset
     if [ "${STACK_TYPE}" = "reporting-superset" ] || [ "${STACK_TYPE}" = "superset" ]; then
         RH_SOURCE_DIRS=("$COMPOSE_SRC" "$PROJECT_DIR")
-        if [ -n "$SUPSERSET_PROJECT_DIR" ]; then
-            RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR")
-            RH_SOURCE_DIRS+=("$SUPSERSET_PROJECT_DIR/$DEPLOYMENT_SUBDIR")
+        if [ -n "$SUPERSET_PROJECT_DIR" ]; then
+            RH_SOURCE_DIRS+=("$SUPERSET_PROJECT_DIR")
+            RH_SOURCE_DIRS+=("$SUPERSET_PROJECT_DIR/$DEPLOYMENT_SUBDIR")
         fi
 
         RH_COMPOSE_SRC=""
@@ -849,22 +861,57 @@ create_package() {
             cp "$RH_COMPOSE_SRC" "$PACKAGE_DIR/docker-compose.rh.yml"
             log_success "✓ docker-compose.rh.yml copié (source: $RH_COMPOSE_SRC)"
 
-            RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
+            # Source canonique: database-rh/initdb.
+            # Compat legacy: docker/database-rh/initdb en entrée uniquement.
+            RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/database-rh/initdb"
             if [ ! -d "$RH_SQL_SRC_DIR" ]; then
-                RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/database-rh/initdb"
+                RH_SQL_SRC_DIR="$(dirname "$RH_COMPOSE_SRC")/docker/database-rh/initdb"
             fi
 
             if [ -d "$RH_SQL_SRC_DIR" ] && ls "$RH_SQL_SRC_DIR"/*.sql >/dev/null 2>&1; then
-                mkdir -p "$PACKAGE_DIR/docker/database-rh/initdb"
-                cp "$RH_SQL_SRC_DIR"/*.sql "$PACKAGE_DIR/docker/database-rh/initdb/"
-                RH_SQL_COUNT=$(ls -1 "$PACKAGE_DIR/docker/database-rh/initdb/"*.sql 2>/dev/null | wc -l | tr -d ' ')
+                mkdir -p "$PACKAGE_DIR/database-rh/initdb"
+                cp "$RH_SQL_SRC_DIR"/*.sql "$PACKAGE_DIR/database-rh/initdb/"
+                RH_SQL_COUNT=$(ls -1 "$PACKAGE_DIR/database-rh/initdb/"*.sql 2>/dev/null | wc -l | tr -d ' ')
                 log_success "✓ Scripts SQL RH copiés: $RH_SQL_COUNT fichier(s)"
             else
-                log_error "❌ Scripts SQL RH introuvables (attendu dans docker/database-rh/initdb ou database-rh/initdb)"
+                log_error "❌ Scripts SQL RH introuvables (attendu dans database-rh/initdb, fallback legacy docker/database-rh/initdb)"
                 exit 1
             fi
+
+            # Migration package: harmoniser le volume RH vers ./database-rh/initdb.
+            if [ -f "$PACKAGE_DIR/docker-compose.rh.yml" ]; then
+                sed_inplace 's|\./docker/database-rh/initdb|\./database-rh/initdb|g' "$PACKAGE_DIR/docker-compose.rh.yml"
+            fi
+
+            # Script utilitaire explicite pour démarrer la base RH sur le serveur.
+            cat > "$PACKAGE_DIR/scripts/start-rh-db.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+echo "Préparation des scripts SQL RH..."
+if [ -x "$PROJECT_DIR/scripts/project-scripts/prepare-rh-db.sh" ]; then
+  bash "$PROJECT_DIR/scripts/project-scripts/prepare-rh-db.sh"
+elif [ -x "$PROJECT_DIR/scripts/prepare-rh-db.sh" ]; then
+  bash "$PROJECT_DIR/scripts/prepare-rh-db.sh"
+else
+  echo "Avertissement: prepare-rh-db.sh introuvable, poursuite."
+fi
+
+echo "Démarrage de db-rh..."
+docker compose -f "$PROJECT_DIR/docker-compose.rh.yml" up -d db-rh
+
+echo ""
+docker compose -f "$PROJECT_DIR/docker-compose.rh.yml" ps db-rh
+echo ""
+echo "Base RH démarrée."
+EOF
+            chmod +x "$PACKAGE_DIR/scripts/start-rh-db.sh"
+            log_success "✓ scripts/start-rh-db.sh généré"
         else
-            log_warn "⚠️  docker-compose.rh.yml non trouvé (deployment/, PROJECT_DIR ou SUPSERSET_PROJECT_DIR)"
+            log_warn "⚠️  docker-compose.rh.yml non trouvé (deployment/, PROJECT_DIR ou SUPERSET_PROJECT_DIR)"
         fi
     else
         log_info "Compose RH ignoré (stack_type=${STACK_TYPE:-non défini}, requis: reporting-superset)"
@@ -1085,7 +1132,11 @@ EOFPROFILE
     if [ -d "$PROJECT_SCRIPTS_DIR" ]; then
         mkdir -p "$PACKAGE_DIR/scripts/project-scripts"
         cp -r "$PROJECT_SCRIPTS_DIR"/. "$PACKAGE_DIR/scripts/project-scripts/"
-        log_success "✓ scripts/ du projet copié vers scripts/project-scripts/"
+        # Nettoyage des artefacts locaux non nécessaires dans le package
+        rm -rf "$PACKAGE_DIR/scripts/project-scripts/.venv"
+        find "$PACKAGE_DIR/scripts/project-scripts" -type d -name "__pycache__" -prune -exec rm -rf {} +
+        find "$PACKAGE_DIR/scripts/project-scripts" -type f -name "*.pyc" -delete
+        log_success "✓ scripts/ du projet copié vers scripts/project-scripts/ (sans .venv/__pycache__)"
     else
         log_info "Aucun dossier scripts/ à la racine du projet"
     fi
@@ -1155,6 +1206,14 @@ Le script gère automatiquement :
 ```bash
 pip3 install -r scripts/requirements.txt
 python3 scripts/superset_manager.py import --all
+```
+
+### Base RH locale au serveur (optionnel)
+
+Pour démarrer la base RH utilisée par certains dashboards:
+
+```bash
+./scripts/start-rh-db.sh
 ```
 EOF
     fi
