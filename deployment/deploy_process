@@ -80,6 +80,10 @@ Dans le menu `devops` :
 
 * Build le package minimal
 * Copie automatiquement sur le serveur via SSH
+* Pour `reporting-superset`, inclut maintenant :
+  * `docker-compose.rh.yml`
+  * `database-rh/initdb/*.sql` (source unique)
+  * `scripts/start-rh-db.sh`
 
 ---
 
@@ -133,6 +137,25 @@ Déployer l’application depuis Docker Hub sur le serveur
    ```
 
    ⚠️ Mettre `Y` uniquement si vous souhaitez repartir de zéro
+
+7. (Stack `reporting-superset`) Démarrer la DB RH :
+
+   ```bash
+   ./scripts/start-rh-db.sh
+   ```
+
+8. Réappliquer les assets Superset :
+
+   ```bash
+   ./.venv/bin/python -m scripts.superset_manager --env dev import --all
+   ```
+
+9. Si des dossiers hérités existent hors projet (`/srv/home/config`, `/srv/home/exports`),
+   les supprimer en root (une seule fois) :
+
+   ```bash
+   sudo rm -rf /srv/home/config /srv/home/exports
+   ```
 
 ---
 
