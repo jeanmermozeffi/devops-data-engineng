@@ -131,6 +131,197 @@ resolve_orchestrator_airflow_build_config() {
 }
 
 # ============================================================================
+# PLATEFORMES BUILDX (SÉLECTION & VALIDATION)
+# ============================================================================
+
+normalize_platforms_csv() {
+    local platforms="$1"
+    platforms=$(echo "$platforms" | tr '+;' ',,')
+    platforms=$(echo "$platforms" | tr -d '[:space:]')
+    platforms=$(echo "$platforms" | sed -E 's/,+/,/g; s/^,+//; s/,+$//')
+    echo "$platforms"
+}
+
+platform_number_to_value() {
+    local number="$1"
+    case "$number" in
+        1) echo "linux/amd64" ;;
+        2) echo "linux/arm64" ;;
+        3) echo "linux/arm/v7" ;;
+        4) echo "linux/arm/v6" ;;
+        *) return 1 ;;
+    esac
+}
+
+platform_description() {
+    local platform="$1"
+    case "$platform" in
+        linux/amd64) echo "x86_64 - serveurs/cloud (le plus rapide à builder)" ;;
+        linux/arm64) echo "ARM 64-bit - Graviton, Apple Silicon, Raspberry Pi 64-bit" ;;
+        linux/arm/v7) echo "ARM 32-bit v7 - Raspberry Pi 2/3, IoT" ;;
+        linux/arm/v6) echo "ARM 32-bit v6 - anciens Raspberry Pi/IoT legacy" ;;
+        *) echo "plateforme personnalisée" ;;
+    esac
+}
+
+platforms_from_number_list() {
+    local number_list
+    number_list=$(normalize_platforms_csv "$1")
+    [ -n "$number_list" ] || return 1
+
+    local result=()
+    local num
+    local platform
+    local existing
+    local already_present
+
+    local IFS=','
+    read -ra nums <<< "$number_list"
+    for num in "${nums[@]}"; do
+        platform=$(platform_number_to_value "$num" || true)
+        if [ -z "$platform" ]; then
+            log_error "Numéro de plateforme invalide: $num"
+            return 1
+        fi
+
+        already_present=false
+        for existing in "${result[@]}"; do
+            if [ "$existing" == "$platform" ]; then
+                already_present=true
+                break
+            fi
+        done
+
+        if [ "$already_present" == "false" ]; then
+            result+=("$platform")
+        fi
+    done
+
+    [ "${#result[@]}" -gt 0 ] || return 1
+
+    local joined
+    joined="${result[*]}"
+    echo "$joined"
+}
+
+resolve_platform_spec() {
+    local raw_spec="$1"
+    local spec
+    spec=$(normalize_platforms_csv "$raw_spec")
+    [ -n "$spec" ] || return 1
+
+    if [[ "$spec" == *"/"* ]]; then
+        echo "$spec"
+        return 0
+    fi
+
+    if [[ "$spec" =~ ^[0-9,]+$ ]]; then
+        platforms_from_number_list "$spec"
+        return $?
+    fi
+
+    return 1
+}
+
+log_selected_platforms() {
+    local platforms_csv="$1"
+    local platform
+
+    log_info "Plateformes sélectionnées: $platforms_csv"
+    local IFS=','
+    read -ra platforms <<< "$platforms_csv"
+    for platform in "${platforms[@]}"; do
+        echo -e "  ${CYAN}-${NC} ${WHITE}${platform}${NC} - $(platform_description "$platform")"
+    done
+}
+
+choose_multiarch_platforms() {
+    local default_platforms="$1"
+    local choice=""
+    local selected=""
+
+    echo ""
+    echo -e "${CYAN}Sélection des plateformes Buildx:${NC}"
+    echo "  1) linux/amd64          (x86_64, build le plus rapide)"
+    echo "  2) linux/arm64          (ARM64)"
+    echo "  3) linux/arm/v7         (ARM 32-bit v7)"
+    echo "  4) linux/arm/v6         (ARM 32-bit v6, legacy)"
+    echo ""
+    echo -e "${CYAN}Combinaisons recommandées:${NC}"
+    echo "  5) 1+2                  (standard: amd64 + arm64)"
+    echo "  6) 1+2+3                (étendu: amd64 + arm64 + arm/v7)"
+    echo "  7) 1+2+3+4              (complet: le plus lent)"
+    echo "  8) Combinaison personnalisée (ex: 1,3)"
+    echo "  9) Garder la config actuelle (${default_platforms})"
+    echo ""
+    read -p "Choisissez une option (1-9, Entrée=9): " choice
+    choice=${choice:-9}
+
+    case "$choice" in
+        1) selected="linux/amd64" ;;
+        2) selected="linux/arm64" ;;
+        3) selected="linux/arm/v7" ;;
+        4) selected="linux/arm/v6" ;;
+        5) selected="linux/amd64,linux/arm64" ;;
+        6) selected="linux/amd64,linux/arm64,linux/arm/v7" ;;
+        7) selected="linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6" ;;
+        8)
+            local custom_numbers
+            read -p "Entrez les numéros à combiner (ex: 1,3): " custom_numbers
+            selected=$(platforms_from_number_list "$custom_numbers" || true)
+            if [ -z "$selected" ]; then
+                log_error "Combinaison invalide"
+                return 1
+            fi
+            ;;
+        9)
+            selected="$default_platforms"
+            ;;
+        *)
+            log_error "Choix invalide"
+            return 1
+            ;;
+    esac
+
+    echo "$selected"
+}
+
+resolve_multiarch_platforms() {
+    local default_platforms="$1"
+    local override_spec="$2"
+    local choose_platforms="${3:-false}"
+    local normalized_default
+    local selected=""
+
+    normalized_default=$(normalize_platforms_csv "$default_platforms")
+    if [ -z "$normalized_default" ]; then
+        normalized_default="linux/amd64,linux/arm64"
+    fi
+
+    if [ -n "$override_spec" ]; then
+        selected=$(resolve_platform_spec "$override_spec" || true)
+        if [ -z "$selected" ]; then
+            log_error "Format de --platforms invalide: '$override_spec'"
+            log_info "Formats acceptés: linux/amd64,linux/arm64 ou 1,2"
+            return 1
+        fi
+        echo "$selected"
+        return 0
+    fi
+
+    if [ "$choose_platforms" == "true" ]; then
+        if [ -t 0 ]; then
+            selected=$(choose_multiarch_platforms "$normalized_default") || return 1
+            echo "$selected"
+            return 0
+        fi
+        log_warn "Sélection interactive des plateformes ignorée (stdin non interactif)"
+    fi
+
+    echo "$normalized_default"
+}
+
+# ============================================================================
 # CONFIGURATION
 # ============================================================================
 
@@ -1309,6 +1500,8 @@ cmd_build_push_multiarch() {
     local no_cache=${3:-false}
     local use_git=${4:-true}
     local git_branch_override=${5:-}
+    local platforms_override=${6:-}
+    local choose_platforms=${7:-false}
     local effective_use_git="$use_git"
 
     log_header "BUILD + PUSH MULTI-ARCH - Environnement: $env"
@@ -1376,12 +1569,17 @@ cmd_build_push_multiarch() {
 
     local full_image_name=$(get_full_image_name "$env" "$version_tag")
     local full_image_latest=$(get_full_image_name "$env" "latest")
+    local default_platforms="${RELEASE_PLATFORMS:-linux/amd64,linux/arm64}"
+    local build_platforms=""
+
+    build_platforms=$(resolve_multiarch_platforms "$default_platforms" "$platforms_override" "$choose_platforms") || return 1
 
     log_info "Image: $full_image_name"
     log_info "Branche Git: $git_branch"
     log_info "Tag: $version_tag"
-    log_info "Mode: Build multi-architecture (${RELEASE_PLATFORMS:-linux/amd64,linux/arm64})"
+    log_info "Mode: Build multi-architecture ($build_platforms)"
     log_info "Push direct vers registry (pas de chargement local)"
+    log_selected_platforms "$build_platforms"
 
     # Créer ou utiliser un builder buildx
     local buildx_builder="devops-builder"
@@ -1414,7 +1612,6 @@ cmd_build_push_multiarch() {
     local app_python_path="${APP_PYTHON_PATH:-}"
     local airflow_version="${AIRFLOW_VERSION:-}"
     local airflow_base_image="${AIRFLOW_BASE_IMAGE:-}"
-    local build_platforms="${RELEASE_PLATFORMS:-linux/amd64,linux/arm64}"
     local build_args=(
         "--file" "$dockerfile"
         "--platform" "$build_platforms"
@@ -1559,7 +1756,7 @@ cmd_build_push_multiarch() {
     print_separator
     log_success "Image multi-architecture construite et pushée avec succès!"
     log_success "Tags: $version_tag, latest"
-    log_success "Architectures: linux/amd64, linux/arm64"
+    log_success "Architectures: $build_platforms"
 }
 
 # Build et push en une seule commande
@@ -1569,6 +1766,8 @@ cmd_release() {
     local no_cache=${3:-false}
     local use_git=${4:-true}
     local git_branch_override=${5:-}
+    local platforms_override=${6:-}
+    local choose_platforms=${7:-false}
     local release_multiarch="${RELEASE_MULTIARCH:-auto}"
 
     log_header "RELEASE - Environnement: $env"
@@ -1590,7 +1789,7 @@ cmd_release() {
         true)
             if docker buildx version &>/dev/null; then
                 log_info "RELEASE_MULTIARCH=true - Build multi-architecture forcé"
-                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override" "$platforms_override" "$choose_platforms"
             else
                 log_error "RELEASE_MULTIARCH=true mais Docker Buildx n'est pas disponible"
                 return 1
@@ -1603,8 +1802,8 @@ cmd_release() {
             ;;
         auto|*)
             if docker buildx version &>/dev/null; then
-                log_info "Docker Buildx détecté - Build multi-architecture (linux/amd64,linux/arm64)"
-                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
+                log_info "Docker Buildx détecté - Build multi-architecture"
+                cmd_build_push_multiarch "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override" "$platforms_override" "$choose_platforms"
             else
                 log_warn "Docker Buildx non disponible - Build pour architecture locale uniquement"
                 cmd_build "$env" "$version_tag" "$no_cache" "$use_git" "$git_branch_override"
@@ -1797,7 +1996,7 @@ show_interactive_menu() {
     echo " 12) Nettoyer les images locales"
     echo " 13) Inspecter une image"
     echo " 14) Se connecter au registry"
-    echo -e " 15) ${YELLOW}Build + Push Multi-Architecture FORCÉ (amd64+arm64)${NC}"
+    echo -e " 15) ${YELLOW}Build + Push Multi-Architecture FORCÉ (plateformes sélectionnables)${NC}"
     echo " 16) Nettoyer les builders Buildx"
     echo ""
     print_separator
@@ -1971,7 +2170,7 @@ interactive_mode() {
                     log_info "Build local: branche détectée -> $git_branch_override"
                 fi
 
-                cmd_release "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
+                cmd_release "$env" "$version" "$no_cache" "$use_git" "$git_branch_override" "" "true"
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
@@ -2049,7 +2248,7 @@ interactive_mode() {
                 env=$(choose_environment) || continue
                 echo ""
 
-                log_warn "Option 15 force un build multi-architecture (amd64+arm64), même si RELEASE_MULTIARCH=false"
+                log_warn "Option 15 force un build multi-architecture, même si RELEASE_MULTIARCH=false"
                 read -p "Confirmer le mode multi-arch forcé ? (yes/n): " force_multiarch_confirm
                 if [ "$force_multiarch_confirm" != "yes" ]; then
                     log_info "Opération annulée"
@@ -2086,7 +2285,7 @@ interactive_mode() {
                     log_info "Build local: branche détectée -> $git_branch_override"
                 fi
 
-                cmd_build_push_multiarch "$env" "$version" "$no_cache" "$use_git" "$git_branch_override"
+                cmd_build_push_multiarch "$env" "$version" "$no_cache" "$use_git" "$git_branch_override" "" "true"
                 echo ""
                 read -p "Appuyez sur Entrée pour continuer..."
                 ;;
@@ -2134,15 +2333,19 @@ ${CYAN}BUILD & RELEASE:${NC}
         --branch <nom>                         Forcer la branche Git à builder
         --profile <name>                       Utiliser un profil spécifique
 
-    build-push-multiarch <env> [version]       Build multi-arch FORCE (amd64+arm64) et push
+    build-push-multiarch <env> [version]       Build multi-arch FORCE (plateformes configurables) et push
         --no-cache                             Construire sans cache
         --local                                Utiliser les fichiers locaux (pas Git)
         --branch <nom>                         Forcer la branche Git à builder
+        --platforms <liste|numéros>            Ex: linux/amd64,linux/arm64 ou 1,2
+        --choose-platforms                     Afficher un menu de sélection numéroté
 
     push <env> [version]                       Envoyer l'image vers le registry
     pull <env> [version]                       Télécharger l'image depuis le registry
     release <env> [version] [options]          Build + Push (respecte RELEASE_MULTIARCH)
         --branch <nom>                         Forcer la branche Git à builder
+        --platforms <liste|numéros>            Ex: linux/amd64,linux/arm64 ou 1,2
+        --choose-platforms                     Afficher un menu de sélection numéroté
 
 ${CYAN}GESTION:${NC}
     list [env]                         Lister les images locales
@@ -2337,6 +2540,8 @@ main() {
             NO_CACHE=false
             USE_GIT=true
             GIT_BRANCH_OVERRIDE=""
+            PLATFORMS_OVERRIDE=""
+            CHOOSE_PLATFORMS=false
             shift 2 2>/dev/null || shift 1 2>/dev/null || true
             while [ $# -gt 0 ]; do
                 case "$1" in
@@ -2347,12 +2552,20 @@ main() {
                         [ -z "$1" ] && { log_error "Valeur manquante pour --branch"; exit 1; }
                         GIT_BRANCH_OVERRIDE="$1"
                         ;;
+                    --platforms)
+                        shift
+                        [ -z "$1" ] && { log_error "Valeur manquante pour --platforms"; exit 1; }
+                        PLATFORMS_OVERRIDE="$1"
+                        ;;
+                    --choose-platforms)
+                        CHOOSE_PLATFORMS=true
+                        ;;
                     --profile) shift ;; # Déjà traité
                 esac
                 shift
             done
             [ -z "$VERSION" ] && VERSION=$(generate_version_tag "$ENV")
-            cmd_release "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE"
+            cmd_release "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE" "$PLATFORMS_OVERRIDE" "$CHOOSE_PLATFORMS"
             ;;
         build-push-multiarch|multiarch)
             ENV=${1:-}
@@ -2360,6 +2573,8 @@ main() {
             NO_CACHE=false
             USE_GIT=true
             GIT_BRANCH_OVERRIDE=""
+            PLATFORMS_OVERRIDE=""
+            CHOOSE_PLATFORMS=false
             shift 2 2>/dev/null || shift 1 2>/dev/null || true
             while [ $# -gt 0 ]; do
                 case "$1" in
@@ -2370,13 +2585,21 @@ main() {
                         [ -z "$1" ] && { log_error "Valeur manquante pour --branch"; exit 1; }
                         GIT_BRANCH_OVERRIDE="$1"
                         ;;
+                    --platforms)
+                        shift
+                        [ -z "$1" ] && { log_error "Valeur manquante pour --platforms"; exit 1; }
+                        PLATFORMS_OVERRIDE="$1"
+                        ;;
+                    --choose-platforms)
+                        CHOOSE_PLATFORMS=true
+                        ;;
                     --profile) shift ;; # Déjà traité
                 esac
                 shift
             done
             [ -z "$ENV" ] && { log_error "Environnement requis"; exit 1; }
             [ -z "$VERSION" ] && VERSION=$(generate_version_tag "$ENV")
-            cmd_build_push_multiarch "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE"
+            cmd_build_push_multiarch "$ENV" "$VERSION" "$NO_CACHE" "$USE_GIT" "$GIT_BRANCH_OVERRIDE" "$PLATFORMS_OVERRIDE" "$CHOOSE_PLATFORMS"
             ;;
         list)
             cmd_list "${1:-}"
