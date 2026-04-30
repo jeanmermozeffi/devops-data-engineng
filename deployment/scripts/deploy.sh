@@ -710,6 +710,11 @@ detect_stack_type_for_env() {
         return 0
     fi
 
+    if echo "$services" | grep -Eq '(^| )(airflow-webserver|airflow-scheduler|airflow-worker|airflow-triggerer)( |$)'; then
+        echo "orchestrator"
+        return 0
+    fi
+
     if echo "$services" | grep -Eq '(^| )api( |$)'; then
         if echo "$services" | grep -Eq '(^| )postgres( |$)'; then
             echo "fastapi-postgres-redis"
@@ -719,7 +724,12 @@ detect_stack_type_for_env() {
         return 0
     fi
 
-    echo "${STACK_TYPE:-fastapi-redis}"
+    # Si STACK_TYPE est explicitement défini, le respecter plutôt que de forcer fastapi-redis
+    if [ -n "${STACK_TYPE:-}" ]; then
+        echo "$STACK_TYPE"
+    else
+        echo "fastapi-redis"
+    fi
 }
 
 # ============================================================================
@@ -813,13 +823,21 @@ cmd_deploy() {
 
     # DEV: activer le hot-reload uniquement pour les stacks FastAPI
     if [ "$env" == "dev" ]; then
-        local services_list
-        services_list="$(get_compose_services "$env" "$(pwd)" 2>/dev/null | tr '\n' ' ')"
-        if echo "$services_list" | grep -Eq '(^| )api( |$)'; then
-            supports_fastapi_reload=true
-        elif [[ "${STACK_TYPE:-}" == fastapi-* ]]; then
-            supports_fastapi_reload=true
-        fi
+        # Exclure d'abord les stacks non-FastAPI connues — avant toute lecture des services compose
+        case "${STACK_TYPE:-}" in
+            orchestrator|monitoring|reporting-superset|streaming-kafka)
+                : # supports_fastapi_reload reste false
+                ;;
+            *)
+                local services_list
+                services_list="$(get_compose_services "$env" "$(pwd)" 2>/dev/null | tr '\n' ' ')"
+                if echo "$services_list" | grep -Eq '(^| )api( |$)'; then
+                    supports_fastapi_reload=true
+                elif [[ "${STACK_TYPE:-}" == fastapi-* ]]; then
+                    supports_fastapi_reload=true
+                fi
+                ;;
+        esac
 
         if [ "$supports_fastapi_reload" == "true" ]; then
             local resolved_reload="$use_reload"
@@ -1007,6 +1025,9 @@ cmd_deploy() {
                 ;;
             streaming-kafka)
                 containers=("dim_consumer" "fact_consumer" "redis")
+                ;;
+            orchestrator)
+                containers=("airflow-webserver" "airflow-scheduler" "airflow-worker" "airflow-triggerer" "postgres" "redis")
                 ;;
             *)
                 containers=("api" "redis")
@@ -1319,6 +1340,31 @@ cmd_health() {
                 return 1
             fi
             ;;
+        orchestrator)
+            local airflow_port
+            case "$env" in
+                staging) airflow_port="${AIRFLOW_STAGING_PORT:-8081}" ;;
+                prod)    airflow_port="${AIRFLOW_PROD_PORT:-8082}" ;;
+                *)       airflow_port="${AIRFLOW_DEV_PORT:-8080}" ;;
+            esac
+            local airflow_health_max_attempts="${API_HEALTH_MAX_ATTEMPTS:-20}"
+            local airflow_health_sleep="${API_HEALTH_SLEEP_SECONDS:-5}"
+
+            log_info "Health check Airflow Webserver (port $airflow_port)..."
+            for i in $(seq 1 "$airflow_health_max_attempts"); do
+                if curl -sf "http://localhost:$airflow_port/health" > /dev/null 2>&1; then
+                    log_success "Airflow Webserver opérationnel sur le port $airflow_port"
+                    return 0
+                else
+                    if [ "$i" -eq "$airflow_health_max_attempts" ]; then
+                        log_error "Airflow Webserver ne répond pas après $airflow_health_max_attempts tentatives"
+                        return 1
+                    fi
+                    log_warn "Tentative $i/$airflow_health_max_attempts... (attente ${airflow_health_sleep}s)"
+                    sleep "$airflow_health_sleep"
+                fi
+            done
+            ;;
         *)
             local port=$(get_port_for_env "$env" "api")
             local healthcheck_url="${AIRFLOW_API_HEALTHCHECK_URL:-http://localhost:$port/health}"
@@ -1468,6 +1514,9 @@ cmd_cleanup_bad_names() {
                 ;;
             streaming-kafka)
                 containers=("dim_consumer" "fact_consumer" "redis")
+                ;;
+            orchestrator)
+                containers=("airflow-webserver" "airflow-scheduler" "airflow-worker" "airflow-triggerer" "postgres" "redis")
                 ;;
             *)
                 containers=("api" "redis")

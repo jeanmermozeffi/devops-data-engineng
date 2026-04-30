@@ -422,7 +422,13 @@ load_devops_config() {
     export REDIS_PROD_PORT="${REDIS_PROD_PORT:-6380}"
 
     # Type de stack
-    export STACK_TYPE="${STACK_TYPE:-fastapi-redis}"
+    if [ -z "${STACK_TYPE:-}" ]; then
+        log_warn "stack_type non défini dans .devops.yml — défaut utilisé: fastapi-redis" 2>/dev/null || \
+            echo "[WARN] stack_type non défini dans .devops.yml — défaut utilisé: fastapi-redis" >&2
+        export STACK_TYPE="fastapi-redis"
+    else
+        export STACK_TYPE
+    fi
 
     # Structure du projet
     export DEPLOYMENT_DIR="${DEPLOYMENT_DIR:-deployment}"
