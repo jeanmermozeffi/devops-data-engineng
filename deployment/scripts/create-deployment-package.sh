@@ -65,6 +65,7 @@ load_devops_config
 
 # Configuration par défaut (peut être surchargée par .devops.yml ou .env.deployment)
 PROJECT_DIR="${PROJECT_ROOT:-$(pwd)}"
+PROJECT_FILES_DIR="${PROJECT_RUNTIME_ROOT:-$PROJECT_DIR}"
 # Dossier packages dans devops-enginering (non versionné)
 PACKAGES_BASE_DIR="$(dirname "$SCRIPT_DIR")/../packages"
 mkdir -p "$PACKAGES_BASE_DIR"
@@ -224,7 +225,7 @@ resolve_monitoring_dir_for_package() {
     local candidate
     local candidates=()
 
-    candidates+=("$PROJECT_DIR/$DEPLOYMENT_SUBDIR/monitoring")
+    candidates+=("$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/monitoring")
     if [ -n "${DEVOPS_MONITORING_SOURCE:-}" ]; then
         candidates+=("${DEVOPS_MONITORING_SOURCE}")
     fi
@@ -244,8 +245,8 @@ resolve_monitoring_dir_for_package() {
 }
 
 load_env_config() {
-    local env_file="$PROJECT_DIR/deployment/.env.deployment"
-    local example_file="$PROJECT_DIR/deployment/.env.deployment.example"
+    local env_file="$PROJECT_FILES_DIR/deployment/.env.deployment"
+    local example_file="$PROJECT_FILES_DIR/deployment/.env.deployment.example"
 
     if [ -f "$env_file" ]; then
         log_info "Chargement de la configuration supplémentaire depuis: $env_file"
@@ -484,6 +485,9 @@ show_menu() {
     echo ""
 
     log_info "Projet source: ${CYAN}$PROJECT_DIR${NC}"
+    if [ "$PROJECT_FILES_DIR" != "$PROJECT_DIR" ]; then
+        log_info "Racine d'exécution: ${CYAN}$PROJECT_FILES_DIR${NC}"
+    fi
     log_info "Package destination: ${CYAN}$PACKAGE_DIR${NC}"
     echo ""
 
@@ -532,7 +536,7 @@ create_package() {
 
     # Copier les fichiers docker-compose depuis le projet cible
     log_info "Copie des fichiers docker-compose..."
-    COMPOSE_SRC="$PROJECT_DIR/$DEPLOYMENT_SUBDIR"
+    COMPOSE_SRC="$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR"
 
     if ask_yes_no "Copier les docker-compose de tous les environnements" "n"; then
         copy_all_env_compose="true"
@@ -601,7 +605,7 @@ create_package() {
         else
             if [ "${INCLUDE_MONITORING}" = "required" ]; then
                 log_error "Agents monitoring REQUIS pour le stack '${STACK_TYPE}' mais introuvables"
-                log_error "Attendu: $PROJECT_DIR/$DEPLOYMENT_SUBDIR/monitoring"
+                log_error "Attendu: $PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/monitoring"
                 log_info "Conseil: créez le dossier deployment/monitoring/agents/ dans le projet"
                 exit 1
             else
@@ -668,7 +672,7 @@ create_package() {
             local pkg_relative="${clean_path#../}"
             # Pour un fichier comme ../prometheus/prometheus.yml, on copie le dossier parent
             # Pour un dossier comme ../prometheus/rules/, on copie le dossier
-            local source_path="$PROJECT_DIR/$pkg_relative"
+            local source_path="$PROJECT_FILES_DIR/$pkg_relative"
 
             # Déterminer si c'est un fichier ou un dossier
             # Retirer le trailing slash pour les dossiers
@@ -685,7 +689,7 @@ create_package() {
                 continue
             fi
 
-            local source_top="$PROJECT_DIR/$top_dir"
+            local source_top="$PROJECT_FILES_DIR/$top_dir"
             local dest_top="$PACKAGE_DIR/$top_dir"
 
             if [ -d "$source_top" ]; then
@@ -739,7 +743,7 @@ create_package() {
     # Copier superset_config.py uniquement pour les stacks Superset
     # (évite le cas où Docker crée un dossier config/superset_config.py si le fichier manque)
     if [ "${INCLUDE_SUPERSET_ASSETS}" != "false" ]; then
-        local superset_config_src="$PROJECT_DIR/config/superset_config.py"
+        local superset_config_src="$PROJECT_FILES_DIR/config/superset_config.py"
         local superset_config_dest_dir="$PACKAGE_DIR/config"
         local superset_config_dest="$superset_config_dest_dir/superset_config.py"
         if [ -f "$superset_config_src" ]; then
@@ -764,7 +768,7 @@ create_package() {
     TARGET_DEPLOY_ENV="$target_deploy_env"
 
     if [ -n "$TARGET_DEPLOY_ENV" ]; then
-        TARGET_ENV_FILE="$PROJECT_DIR/.env.${TARGET_DEPLOY_ENV}"
+        TARGET_ENV_FILE="$PROJECT_FILES_DIR/.env.${TARGET_DEPLOY_ENV}"
         if [ -f "$TARGET_ENV_FILE" ]; then
             cp "$TARGET_ENV_FILE" "$PACKAGE_DIR/"
             log_success "✓ .env.${TARGET_DEPLOY_ENV} copié (environnement cible)"
@@ -775,8 +779,8 @@ create_package() {
     else
         log_warn "⚠️  Environnement non détecté (ENV ou SERVER_DEPLOY_PATH), fallback: copie de tous les .env.*"
         for env_name in dev staging prod; do
-            if [ -f "$PROJECT_DIR/.env.${env_name}" ]; then
-                cp "$PROJECT_DIR/.env.${env_name}" "$PACKAGE_DIR/"
+            if [ -f "$PROJECT_FILES_DIR/.env.${env_name}" ]; then
+                cp "$PROJECT_FILES_DIR/.env.${env_name}" "$PACKAGE_DIR/"
                 log_success "✓ .env.${env_name} copié"
                 ENV_COPIED=true
             else
@@ -791,7 +795,7 @@ create_package() {
     # - exports/**/yaml + exports/manifest.json (pas de ZIP)
     # Résolution auto: inclure si superset_manager.py est présent
     if [ "${INCLUDE_SUPERSET_ASSETS:-auto}" = "auto" ]; then
-        if [ -f "$PROJECT_DIR/scripts/superset_manager.py" ]; then
+        if [ -f "$PROJECT_FILES_DIR/scripts/superset_manager.py" ]; then
             INCLUDE_SUPERSET_ASSETS="true"
         else
             INCLUDE_SUPERSET_ASSETS="false"
@@ -802,37 +806,37 @@ create_package() {
         log_info "➕ Inclusion des outils Superset (imports possibles sur le serveur)..."
         mkdir -p "$PACKAGE_DIR/scripts" "$PACKAGE_DIR/exports"
 
-        if [ -f "$PROJECT_DIR/scripts/superset_manager.py" ]; then
-            cp "$PROJECT_DIR/scripts/superset_manager.py" "$PACKAGE_DIR/scripts/"
+        if [ -f "$PROJECT_FILES_DIR/scripts/superset_manager.py" ]; then
+            cp "$PROJECT_FILES_DIR/scripts/superset_manager.py" "$PACKAGE_DIR/scripts/"
             log_success "✓ scripts/superset_manager.py copié"
         else
             log_warn "⚠️  scripts/superset_manager.py non trouvé"
         fi
 
-        if [ -f "$PROJECT_DIR/scripts/superset-import.sh" ]; then
-            cp "$PROJECT_DIR/scripts/superset-import.sh" "$PACKAGE_DIR/scripts/"
+        if [ -f "$PROJECT_FILES_DIR/scripts/superset-import.sh" ]; then
+            cp "$PROJECT_FILES_DIR/scripts/superset-import.sh" "$PACKAGE_DIR/scripts/"
             chmod +x "$PACKAGE_DIR/scripts/superset-import.sh"
             log_success "✓ scripts/superset-import.sh copié"
         fi
 
-        if [ -f "$PROJECT_DIR/scripts/requirements.txt" ]; then
-            cp "$PROJECT_DIR/scripts/requirements.txt" "$PACKAGE_DIR/scripts/"
+        if [ -f "$PROJECT_FILES_DIR/scripts/requirements.txt" ]; then
+            cp "$PROJECT_FILES_DIR/scripts/requirements.txt" "$PACKAGE_DIR/scripts/"
             log_success "✓ scripts/requirements.txt copié"
         else
             log_warn "⚠️  scripts/requirements.txt non trouvé"
         fi
 
-        if [ -f "$PROJECT_DIR/exports/manifest.json" ]; then
-            cp "$PROJECT_DIR/exports/manifest.json" "$PACKAGE_DIR/exports/"
+        if [ -f "$PROJECT_FILES_DIR/exports/manifest.json" ]; then
+            cp "$PROJECT_FILES_DIR/exports/manifest.json" "$PACKAGE_DIR/exports/"
             log_success "✓ exports/manifest.json copié"
         else
             log_warn "⚠️  exports/manifest.json non trouvé"
         fi
 
-        if [ -d "$PROJECT_DIR/exports" ]; then
+        if [ -d "$PROJECT_FILES_DIR/exports" ]; then
             # Copier uniquement les YAML (source de vérité GitOps), pas les ZIP
-            find "$PROJECT_DIR/exports" -type d -name yaml | while read -r yaml_dir; do
-                rel_dir="${yaml_dir#$PROJECT_DIR/}"
+            find "$PROJECT_FILES_DIR/exports" -type d -name yaml | while read -r yaml_dir; do
+                rel_dir="${yaml_dir#$PROJECT_FILES_DIR/}"
                 mkdir -p "$PACKAGE_DIR/$rel_dir"
                 cp -R "$yaml_dir"/. "$PACKAGE_DIR/$rel_dir/"
             done
@@ -846,7 +850,7 @@ create_package() {
 
     # Inclure le compose RH (base de donnees test) uniquement pour les stacks Superset
     if [ "${STACK_TYPE}" = "reporting-superset" ] || [ "${STACK_TYPE}" = "superset" ]; then
-        RH_SOURCE_DIRS=("$COMPOSE_SRC" "$PROJECT_DIR")
+        RH_SOURCE_DIRS=("$COMPOSE_SRC" "$PROJECT_FILES_DIR" "$PROJECT_DIR")
         if [ -n "$SUPERSET_PROJECT_DIR" ]; then
             RH_SOURCE_DIRS+=("$SUPERSET_PROJECT_DIR")
             RH_SOURCE_DIRS+=("$SUPERSET_PROJECT_DIR/$DEPLOYMENT_SUBDIR")
@@ -934,7 +938,10 @@ EOF
     fi
 
     # Copier Makefile si present (utile pour outils/venv locaux)
-    if [ -f "$PROJECT_DIR/Makefile" ]; then
+    if [ -f "$PROJECT_FILES_DIR/Makefile" ]; then
+        cp "$PROJECT_FILES_DIR/Makefile" "$PACKAGE_DIR/"
+        log_success "✓ Makefile copié"
+    elif [ -f "$PROJECT_DIR/Makefile" ]; then
         cp "$PROJECT_DIR/Makefile" "$PACKAGE_DIR/"
         log_success "✓ Makefile copié"
     else
@@ -944,14 +951,14 @@ EOF
     if [ "$ENV_COPIED" = false ]; then
         log_error "Aucun fichier .env trouvé à la racine du projet"
         log_info "Création des fichiers depuis .env.example..."
-        if [ -f "$PROJECT_DIR/.env.example" ]; then
+        if [ -f "$PROJECT_FILES_DIR/.env.example" ]; then
             if [ -n "$TARGET_DEPLOY_ENV" ]; then
-                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.${TARGET_DEPLOY_ENV}"
+                cp "$PROJECT_FILES_DIR/.env.example" "$PACKAGE_DIR/.env.${TARGET_DEPLOY_ENV}"
                 log_warn "⚠️  .env.${TARGET_DEPLOY_ENV} créé depuis .env.example - À configurer !"
             else
-                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.dev"
-                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.staging"
-                cp "$PROJECT_DIR/.env.example" "$PACKAGE_DIR/.env.prod"
+                cp "$PROJECT_FILES_DIR/.env.example" "$PACKAGE_DIR/.env.dev"
+                cp "$PROJECT_FILES_DIR/.env.example" "$PACKAGE_DIR/.env.staging"
+                cp "$PROJECT_FILES_DIR/.env.example" "$PACKAGE_DIR/.env.prod"
                 log_warn "⚠️  Fichiers .env créés depuis .env.example - À configurer !"
             fi
         fi
@@ -1069,7 +1076,7 @@ EOFPROFILE
     log_info "Copie des profils registry..."
     mkdir -p "$PACKAGE_DIR/scripts/.registry-profiles"
 
-    PROFILES_DIR="$PROJECT_DIR/$DEPLOYMENT_SUBDIR/scripts/.registry-profiles"
+    PROFILES_DIR="$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/scripts/.registry-profiles"
     PROFILES_DIR_DEVOPS="$SCRIPT_DIR/.registry-profiles"
 
     _copy_profiles_from() {
@@ -1119,7 +1126,7 @@ EOFPROFILE
 
     # Copier les scripts essentiels
     log_info "Copie des scripts..."
-    SCRIPTS_SRC_PROJECT="$PROJECT_DIR/$DEPLOYMENT_SUBDIR/scripts"
+    SCRIPTS_SRC_PROJECT="$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/scripts"
     SCRIPTS_SRC_DEVOPS="$SCRIPT_DIR"
 
     SCRIPTS_TO_COPY=(
@@ -1144,7 +1151,7 @@ EOFPROFILE
     done
 
     # Copier les scripts utilitaires du projet (racine scripts/), si présents
-    PROJECT_SCRIPTS_DIR="$PROJECT_DIR/scripts"
+    PROJECT_SCRIPTS_DIR="$PROJECT_FILES_DIR/scripts"
     if [ -d "$PROJECT_SCRIPTS_DIR" ]; then
         mkdir -p "$PACKAGE_DIR/scripts/project-scripts"
         cp -r "$PROJECT_SCRIPTS_DIR"/. "$PACKAGE_DIR/scripts/project-scripts/"
@@ -1158,8 +1165,8 @@ EOFPROFILE
     fi
 
     # Copier le fichier requirements pour l'environnement virtuel
-    if [ -f "$PROJECT_DIR/$DEPLOYMENT_SUBDIR/requirements-encryption.txt" ]; then
-        cp "$PROJECT_DIR/$DEPLOYMENT_SUBDIR/requirements-encryption.txt" "$PACKAGE_DIR/"
+    if [ -f "$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/requirements-encryption.txt" ]; then
+        cp "$PROJECT_FILES_DIR/$DEPLOYMENT_SUBDIR/requirements-encryption.txt" "$PACKAGE_DIR/"
         log_success "✓ requirements-encryption.txt copié (depuis projet)"
     elif [ -f "$SCRIPT_DIR/../requirements-encryption.txt" ]; then
         cp "$SCRIPT_DIR/../requirements-encryption.txt" "$PACKAGE_DIR/"

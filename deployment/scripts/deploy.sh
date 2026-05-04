@@ -33,7 +33,10 @@ if [ -z "$PROJECT_ROOT" ]; then
     export PROJECT_ROOT
 fi
 
-cd "$PROJECT_ROOT"
+PROJECT_RUNTIME_ROOT="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+export PROJECT_RUNTIME_ROOT
+
+cd "$PROJECT_RUNTIME_ROOT"
 DEFAULT_PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
 
 # COMPOSE_PROJECT_NAME est maintenant chargé depuis .devops.yml
@@ -437,6 +440,16 @@ validate_env() {
     fi
 }
 
+get_runtime_subdir() {
+    if [ "${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}" = "$PROJECT_ROOT" ]; then
+        echo ""
+    elif [[ "${PROJECT_RUNTIME_ROOT:-}" == "$PROJECT_ROOT/"* ]]; then
+        echo "${PROJECT_RUNTIME_ROOT#$PROJECT_ROOT/}"
+    else
+        echo ""
+    fi
+}
+
 # Définir un nom de projet Compose cohérent pour l'environnement ciblé.
 set_compose_project_name_for_env() {
     local env=$1
@@ -693,6 +706,13 @@ detect_stack_type_for_env() {
     local workdir=${2:-$(pwd)}
     local services
 
+    case "${STACK_TYPE:-}" in
+        orchestrator|monitoring|reporting-superset|streaming-kafka|fastapi-redis|fastapi-postgres-redis)
+            echo "$STACK_TYPE"
+            return 0
+            ;;
+    esac
+
     services="$(get_compose_services "$env" "$workdir" 2>/dev/null | tr '\n' ' ')"
 
     if echo "$services" | grep -Eq '(^| )prometheus( |$)|(^| )grafana( |$)'; then
@@ -710,7 +730,7 @@ detect_stack_type_for_env() {
         return 0
     fi
 
-    if echo "$services" | grep -Eq '(^| )(airflow-webserver|airflow-scheduler|airflow-worker|airflow-triggerer)( |$)'; then
+    if echo "$services" | grep -Eq '(^| )(airflow-webserver|airflow-scheduler|airflow-worker|airflow-triggerer|scheduler|triggerer|dag-processor)( |$)'; then
         echo "orchestrator"
         return 0
     fi
@@ -988,13 +1008,21 @@ cmd_deploy() {
                 exit 1
             fi
 
-            # Copier le dossier deployment du projet actuel vers le clone temporaire
+            local temp_workdir="$temp_dir"
+            local runtime_subdir
+            runtime_subdir="$(get_runtime_subdir)"
+            if [ -n "$runtime_subdir" ] && [ -d "$temp_dir/$runtime_subdir" ]; then
+                temp_workdir="$temp_dir/$runtime_subdir"
+            fi
+
+            # Copier le dossier deployment du projet actuel vers la même racine
+            # d'exécution dans le clone temporaire.
             log_info "Copie de la configuration de déploiement..."
-            rm -rf "$temp_dir/deployment"
-            cp -r "deployment" "$temp_dir/deployment"
+            rm -rf "$temp_workdir/deployment"
+            cp -r "deployment" "$temp_workdir/deployment"
 
             log_info "Construction de l'image depuis le clone temporaire..."
-            run_compose_build "$env" "$no_cache" "$temp_dir"
+            run_compose_build "$env" "$no_cache" "$temp_workdir"
 
             # Nettoyer le clone temporaire
             log_info "Nettoyage du clone temporaire..."
@@ -1093,6 +1121,7 @@ cmd_deploy() {
 cmd_start() {
     local env=$1
     validate_env "$env"
+    load_env "$env"
     set_compose_project_name_for_env "$env"
 
     log_header "DÉMARRAGE - Environnement: $env"
@@ -1106,6 +1135,7 @@ cmd_stop() {
     local env=$1
     local mode=${2:-stop}
     validate_env "$env"
+    load_env "$env"
     set_compose_project_name_for_env "$env"
 
     if [ "$mode" == "ask" ]; then
@@ -1170,6 +1200,7 @@ cmd_restart() {
     local env=$1
     local service=$2
     validate_env "$env"
+    load_env "$env"
     set_compose_project_name_for_env "$env"
 
     log_header "REDÉMARRAGE - Environnement: $env"
@@ -1193,10 +1224,12 @@ cmd_logs() {
     local follow=${4:-false}
 
     validate_env "$env"
+    load_env "$env"
+    set_compose_project_name_for_env "$env"
 
     log_header "LOGS - Environnement: $env"
 
-    local log_cmd="docker compose -f docker-compose.yml -f docker-compose.$env.yml logs --tail=$lines"
+    local log_cmd="docker compose -f deployment/docker-compose.yml -f deployment/docker-compose.$env.yml logs --tail=$lines"
 
     if [ "$follow" == "true" ]; then
         log_cmd="$log_cmd -f"
@@ -1226,16 +1259,22 @@ cmd_status() {
         docker ps --filter "name=${PROJECT_NAME}-nginx-proxy" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
     else
         validate_env "$env"
+        load_env "$env"
         set_compose_project_name_for_env "$env"
         log_header "STATUT - Environnement: $env"
-    docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" ps
+        docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" ps
     fi
 
     echo ""
     log_info "Utilisation des ressources:"
     local prefix="${COMPOSE_PROJECT_NAME:-${PROJECT_NAME}}"
-    docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}" \
-        $(docker ps --filter "name=${prefix}" --format "{{.Names}}")
+    local stats_containers
+    stats_containers="$(docker ps --filter "name=${prefix}" --format "{{.Names}}" 2>/dev/null || true)"
+    if [ -n "$stats_containers" ]; then
+        docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}" $stats_containers
+    else
+        log_info "Aucun conteneur en cours pour ${prefix}"
+    fi
 }
 
 # Health check
@@ -1343,21 +1382,31 @@ cmd_health() {
         orchestrator)
             local airflow_port
             case "$env" in
-                staging) airflow_port="${AIRFLOW_STAGING_PORT:-8081}" ;;
-                prod)    airflow_port="${AIRFLOW_PROD_PORT:-8082}" ;;
-                *)       airflow_port="${AIRFLOW_DEV_PORT:-8080}" ;;
+                staging) airflow_port="${AIRFLOW_STAGING_PORT:-${STAGING_PORT:-8081}}" ;;
+                prod)    airflow_port="${AIRFLOW_PROD_PORT:-${PROD_PORT:-8082}}" ;;
+                *)       airflow_port="${AIRFLOW_DEV_PORT:-${DEV_PORT:-8080}}" ;;
             esac
+            local airflow_health_url="${AIRFLOW_API_HEALTHCHECK_URL:-http://localhost:$airflow_port/health}"
             local airflow_health_max_attempts="${API_HEALTH_MAX_ATTEMPTS:-20}"
             local airflow_health_sleep="${API_HEALTH_SLEEP_SECONDS:-5}"
 
-            log_info "Health check Airflow Webserver (port $airflow_port)..."
+            if [[ "$airflow_health_url" != http://* && "$airflow_health_url" != https://* ]]; then
+                airflow_health_url="http://localhost:$airflow_port$airflow_health_url"
+            fi
+
+            if [[ "$airflow_health_url" =~ ^https?://(localhost|127\.0\.0\.1|api):8080(/.*)?$ ]]; then
+                local health_path="${BASH_REMATCH[2]:-/health}"
+                airflow_health_url="http://localhost:$airflow_port$health_path"
+            fi
+
+            log_info "Health check Airflow: $airflow_health_url"
             for i in $(seq 1 "$airflow_health_max_attempts"); do
-                if curl -sf "http://localhost:$airflow_port/health" > /dev/null 2>&1; then
-                    log_success "Airflow Webserver opérationnel sur le port $airflow_port"
+                if curl -sf "$airflow_health_url" > /dev/null 2>&1; then
+                    log_success "Airflow opérationnel: $airflow_health_url"
                     return 0
                 else
                     if [ "$i" -eq "$airflow_health_max_attempts" ]; then
-                        log_error "Airflow Webserver ne répond pas après $airflow_health_max_attempts tentatives"
+                        log_error "Airflow ne répond pas après $airflow_health_max_attempts tentatives"
                         return 1
                     fi
                     log_warn "Tentative $i/$airflow_health_max_attempts... (attente ${airflow_health_sleep}s)"
@@ -1420,6 +1469,7 @@ cmd_rebuild() {
     local env=$1
     local no_cache=${2:-true}
     validate_env "$env"
+    load_env "$env"
 
     if [ "$env" == "prod" ]; then
         confirm_action "Reconstruire les images de PRODUCTION ?" "$env"
@@ -1441,6 +1491,8 @@ cmd_clean() {
 
     if [ "$env" != "all" ]; then
         validate_env "$env"
+        load_env "$env"
+        set_compose_project_name_for_env "$env"
         confirm_action "Nettoyer l'environnement $env du projet $project ?" "$env"
 
         log_info "Arrêt et suppression des conteneurs $env..."

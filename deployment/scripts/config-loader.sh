@@ -197,6 +197,9 @@ load_devops_config() {
             dockerfile_dir)
                 export DOCKERFILE_DIR="$value"
                 ;;
+            runtime_root|project_runtime_root|app_root)
+                export PROJECT_RUNTIME_ROOT="$value"
+                ;;
 
             # Configuration application (FastAPI/Python)
             app_source_dir)
@@ -448,13 +451,40 @@ load_devops_config() {
     export AIRFLOW_DAGS_FOLDER_DEFAULT="${AIRFLOW_DAGS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/dags}"
     export AIRFLOW_PLUGINS_FOLDER_DEFAULT="${AIRFLOW_PLUGINS_FOLDER_DEFAULT:-/opt/airflow/src/airflow_src/plugins}"
 
+    # Racine d'exécution: certains repos gardent .devops.yml à la racine Git
+    # mais placent .env.*, deployment/, dags/, plugins/, etc. sous src/.
+    local configured_runtime_root="${PROJECT_RUNTIME_ROOT:-}"
+    local configured_deployment_dir="${DEPLOYMENT_DIR:-deployment}"
+    if [ -n "$configured_runtime_root" ]; then
+        if [[ "$configured_runtime_root" = /* ]]; then
+            PROJECT_RUNTIME_ROOT="$configured_runtime_root"
+        else
+            PROJECT_RUNTIME_ROOT="$PROJECT_ROOT/$configured_runtime_root"
+        fi
+    else
+        PROJECT_RUNTIME_ROOT="$PROJECT_ROOT"
+    fi
+
+    if [ "$configured_deployment_dir" = "src/deployment" ] && \
+       [ -f "$PROJECT_ROOT/src/deployment/docker-compose.yml" ]; then
+        PROJECT_RUNTIME_ROOT="$PROJECT_ROOT/src"
+        DEPLOYMENT_DIR="deployment"
+    elif [ -f "$PROJECT_ROOT/src/deployment/docker-compose.yml" ] && \
+         [ ! -f "$PROJECT_ROOT/$configured_deployment_dir/docker-compose.yml" ]; then
+        PROJECT_RUNTIME_ROOT="$PROJECT_ROOT/src"
+        DEPLOYMENT_DIR="deployment"
+    fi
+
+    export PROJECT_RUNTIME_ROOT
+    export DEPLOYMENT_DIR
+
     # SSH
     export SSH_USER="${SSH_USER:-root}"
     export SSH_PORT="${SSH_PORT:-22}"
     export SSH_PATH="${SSH_PATH:-/srv/$PROJECT_NAME}"
 
     # Variables calculées
-    export DEPLOYMENT_PATH="$PROJECT_ROOT/$DEPLOYMENT_DIR"
+    export DEPLOYMENT_PATH="$PROJECT_RUNTIME_ROOT/$DEPLOYMENT_DIR"
     export DOCKERFILE_PATH="$DEPLOYMENT_PATH/$DOCKERFILE_DIR"
 
     return 0
