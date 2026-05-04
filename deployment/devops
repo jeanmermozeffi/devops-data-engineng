@@ -103,6 +103,7 @@ load_project_config() {
             postgres_prod_port) export POSTGRES_PROD_PORT="$value" ;;
             deployment_dir) export DEPLOYMENT_DIR="$value" ;;
             dockerfile_dir) export DOCKERFILE_DIR="$value" ;;
+            runtime_root|project_runtime_root|app_root) export PROJECT_RUNTIME_ROOT="$value" ;;
             # Configuration serveur distant SSH
             server_name) export SERVER_NAME="$value" ;;
             server_host) export SERVER_HOST="$value" ;;
@@ -244,7 +245,41 @@ load_project_config() {
     export APP_PYTHON_PATH="${APP_PYTHON_PATH:-}"
     export WORKDIR="${WORKDIR:-/app}"
 
+    resolve_project_layout
+
     log_success "Configuration chargée: $PROJECT_NAME"
+}
+
+resolve_project_layout() {
+    local configured_runtime_root="${PROJECT_RUNTIME_ROOT:-}"
+    local configured_deployment_dir="${DEPLOYMENT_DIR:-deployment}"
+
+    if [ -n "$configured_runtime_root" ]; then
+        if [[ "$configured_runtime_root" = /* ]]; then
+            PROJECT_RUNTIME_ROOT="$configured_runtime_root"
+        else
+            PROJECT_RUNTIME_ROOT="$CURRENT_PROJECT_DIR/$configured_runtime_root"
+        fi
+    else
+        PROJECT_RUNTIME_ROOT="$CURRENT_PROJECT_DIR"
+    fi
+
+    # Nouvelle structure: .devops.yml reste à la racine Git, mais les fichiers
+    # exécutables Docker/compose/env vivent sous src/.
+    if [ "$configured_deployment_dir" = "src/deployment" ] && \
+       [ -f "$CURRENT_PROJECT_DIR/src/deployment/docker-compose.yml" ]; then
+        PROJECT_RUNTIME_ROOT="$CURRENT_PROJECT_DIR/src"
+        DEPLOYMENT_DIR="deployment"
+        log_info "Structure src/ détectée: racine d'exécution $PROJECT_RUNTIME_ROOT"
+    elif [ -f "$CURRENT_PROJECT_DIR/src/deployment/docker-compose.yml" ] && \
+         [ ! -f "$CURRENT_PROJECT_DIR/$configured_deployment_dir/docker-compose.yml" ]; then
+        PROJECT_RUNTIME_ROOT="$CURRENT_PROJECT_DIR/src"
+        DEPLOYMENT_DIR="deployment"
+        log_info "Structure src/ détectée: racine d'exécution $PROJECT_RUNTIME_ROOT"
+    fi
+
+    export PROJECT_RUNTIME_ROOT
+    export DEPLOYMENT_DIR
 }
 
 # Obtenir les fichiers docker-compose pour un environnement
@@ -268,7 +303,8 @@ get_compose_files() {
 # Vérifier si le projet a ses propres fichiers docker-compose
 has_project_compose() {
     local deployment_dir="${DEPLOYMENT_DIR:-deployment}"
-    [ -d "$CURRENT_PROJECT_DIR/$deployment_dir" ] && [ -f "$CURRENT_PROJECT_DIR/$deployment_dir/docker-compose.yml" ]
+    local runtime_root="${PROJECT_RUNTIME_ROOT:-$CURRENT_PROJECT_DIR}"
+    [ -d "$runtime_root/$deployment_dir" ] && [ -f "$runtime_root/$deployment_dir/docker-compose.yml" ]
 }
 
 run_label_standardizer() {
@@ -276,7 +312,7 @@ run_label_standardizer() {
     shift
 
     local labels_script="$DEVOPS_ROOT/scripts/standardize-compose-labels.py"
-    local deployment_dir="$CURRENT_PROJECT_DIR/${DEPLOYMENT_DIR:-deployment}"
+    local deployment_dir="${PROJECT_RUNTIME_ROOT:-$CURRENT_PROJECT_DIR}/${DEPLOYMENT_DIR:-deployment}"
 
     if [ ! -f "$labels_script" ]; then
         log_error "Script labels introuvable: $labels_script"
@@ -737,7 +773,7 @@ cmd_deploy() {
     log_header "DÉPLOIEMENT - $PROJECT_NAME ($env)"
 
     # Vérifier que le dossier deployment existe dans le projet
-    local project_deployment="$CURRENT_PROJECT_DIR/$DEPLOYMENT_DIR"
+    local project_deployment="${PROJECT_RUNTIME_ROOT:-$CURRENT_PROJECT_DIR}/$DEPLOYMENT_DIR"
     if [ ! -d "$project_deployment" ]; then
         log_error "Dossier $DEPLOYMENT_DIR introuvable dans le projet"
         log_info "Structure attendue: $project_deployment"
@@ -746,6 +782,7 @@ cmd_deploy() {
 
     # Définir PROJECT_ROOT pour les scripts
     export PROJECT_ROOT="$CURRENT_PROJECT_DIR"
+    export PROJECT_RUNTIME_ROOT="${PROJECT_RUNTIME_ROOT:-$CURRENT_PROJECT_DIR}"
     export ENV="$env"
 
     # Les scripts deployment/scripts/deploy.sh utilisent ces variables

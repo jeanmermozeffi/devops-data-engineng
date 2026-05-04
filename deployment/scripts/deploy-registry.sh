@@ -138,10 +138,18 @@ if [ -f "$SCRIPT_DIR/.env.registry" ] && [ ! -f "$PROJECT_ROOT/.env.registry" ];
     export PROJECT_ROOT
 fi
 
+PROJECT_RUNTIME_ROOT="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+if [ -f "$PROJECT_ROOT/src/deployment/docker-compose.registry.yml" ] && \
+   [ ! -f "$PROJECT_ROOT/${DEPLOYMENT_DIR:-deployment}/docker-compose.registry.yml" ]; then
+    PROJECT_RUNTIME_ROOT="$PROJECT_ROOT/src"
+    DEPLOYMENT_DIR="deployment"
+fi
+export PROJECT_RUNTIME_ROOT
+
 # DEPLOYMENT_DIR — résoudre en chemin absolu pour éviter les problèmes de CWD
 # après que cmd_status/cmd_restart/cmd_stop aient fait cd "$DEPLOYMENT_DIR"
 if [[ "${DEPLOYMENT_DIR:-}" != /* ]]; then
-    DEPLOYMENT_DIR="$PROJECT_ROOT/${DEPLOYMENT_DIR:-deployment}"
+    DEPLOYMENT_DIR="$PROJECT_RUNTIME_ROOT/${DEPLOYMENT_DIR:-deployment}"
 fi
 # Fallback: package minimal — les fichiers docker-compose sont à la racine du projet
 # (le dossier deployment/ peut exister mais ne contenir que monitoring/, pas les compose)
@@ -150,7 +158,7 @@ if [ ! -f "$DEPLOYMENT_DIR/docker-compose.registry.yml" ] && [ -f "$PROJECT_ROOT
 fi
 
 # Se placer dans le répertoire du projet
-cd "$PROJECT_ROOT"
+cd "$PROJECT_RUNTIME_ROOT"
 DEFAULT_PROJECT_NAME="${PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
 
 # Debug: afficher les chemins au démarrage (décommentez pour diagnostiquer)
@@ -637,22 +645,24 @@ get_env_file() {
             fi
         else
             # Fallback: chercher à la racine du projet
-            if [ -f "$PROJECT_ROOT/.env.$env" ]; then
+            local env_root="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+            if [ -f "$env_root/.env.$env" ]; then
                 log_warn "Fichier chiffré non trouvé, utilisation de .env.$env non chiffré" >&2
-                env_file_path="$PROJECT_ROOT/.env.$env"
+                env_file_path="$env_root/.env.$env"
                 echo "$env_file_path"
                 return 0
             else
                 log_error "Fichier .env.$env introuvable (ni chiffré ni en clair)" >&2
                 log_info "Chiffré attendu: $encrypted_env" >&2
-                log_info "Clair attendu: $PROJECT_ROOT/.env.$env" >&2
+                log_info "Clair attendu: $env_root/.env.$env" >&2
                 return 1
             fi
         fi
     else
         # En local, privilégier .env.<env>.local si disponible.
-        local env_file_local="$PROJECT_ROOT/.env.$env.local"
-        local env_file_standard="$PROJECT_ROOT/.env.$env"
+        local env_root="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+        local env_file_local="$env_root/.env.$env.local"
+        local env_file_standard="$env_root/.env.$env"
 
         if [ -f "$env_file_local" ]; then
             env_file_path="$env_file_local"
@@ -958,7 +968,7 @@ get_compose_files() {
     else
         # Structure complète: les docker-compose sont dans deployment/
         env_file_path="../.env.${env}"
-        env_file_abs="$PROJECT_ROOT/.env.${env}"
+        env_file_abs="$(cd "$DEPLOYMENT_DIR/.." && pwd)/.env.${env}"
     fi
 
     # N'inclure --env-file que si le fichier existe (évite l'échec quand .env est chiffré sur le serveur)
@@ -2228,8 +2238,9 @@ cmd_deploy() {
     ENV_FILE_PATH="$(get_compose_env_file_path "$env")"
 
     # Exporter les chemins pour les volumes (clé et fichier chiffré)
-    export ENV_KEY_PATH="$PROJECT_ROOT/.env.key"
-    export ENV_ENCRYPTED_PATH="$PROJECT_ROOT/.env.${env}.encrypted"
+    local env_root="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+    export ENV_KEY_PATH="$env_root/.env.key"
+    export ENV_ENCRYPTED_PATH="$env_root/.env.${env}.encrypted"
 
     # S'assurer que le fichier .env est accessible pour docker-compose
     # Docker-compose s'attend à trouver ../.env.<env> depuis le répertoire deployment/
@@ -2237,7 +2248,7 @@ cmd_deploy() {
     # Construire le chemin absolu de manière plus robuste
     local target_env_file
     if [ -n "$PROJECT_ROOT" ] && [ "$PROJECT_ROOT" != "/" ]; then
-        target_env_file="$PROJECT_ROOT/.env.$env"
+        target_env_file="$env_root/.env.$env"
     else
         # Fallback: utiliser le chemin absolu depuis DEPLOYMENT_DIR
         target_env_file="$(cd "$DEPLOYMENT_DIR/.." && pwd)/.env.$env"

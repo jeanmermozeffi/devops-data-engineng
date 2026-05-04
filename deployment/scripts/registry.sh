@@ -103,7 +103,7 @@ get_dotenv_value() {
 # Priorité: .env.<env> > variables shell/.devops.yml > defaults config-loader
 resolve_orchestrator_airflow_build_config() {
     local env="$1"
-    local env_file="$PROJECT_ROOT/.env.$env"
+    local env_file="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}/.env.$env"
     local from_env_file_version=""
     local from_env_file_base=""
 
@@ -340,7 +340,10 @@ if [ -z "$PROJECT_ROOT" ]; then
     export PROJECT_ROOT
 fi
 
-cd "$PROJECT_ROOT"
+PROJECT_RUNTIME_ROOT="${PROJECT_RUNTIME_ROOT:-$PROJECT_ROOT}"
+export PROJECT_RUNTIME_ROOT
+
+cd "$PROJECT_RUNTIME_ROOT"
 
 # Répertoire pour stocker les profils
 PROFILES_DIR="$SCRIPT_DIR/.registry-profiles"
