@@ -422,6 +422,166 @@ get_registry_description() {
     esac
 }
 
+# Construire le nom de repository tel qu'attendu par les APIs registry.
+# IMAGE_NAME peut déjà contenir le namespace (ex: user/image).
+get_registry_repository() {
+    local image_name="${IMAGE_NAME:-}"
+
+    if [[ "$image_name" == */* ]]; then
+        echo "$image_name"
+    elif [ -n "${REGISTRY_USERNAME:-}" ]; then
+        echo "${REGISTRY_USERNAME}/${image_name}"
+    else
+        echo "$image_name"
+    fi
+}
+
+format_file_mtime() {
+    local file=$1
+
+    if [ ! -e "$file" ]; then
+        echo "date inconnue"
+        return 0
+    fi
+
+    if stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S %Z" "$file" >/dev/null 2>&1; then
+        stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S %Z" "$file"
+        return 0
+    fi
+
+    if stat -c "%y" "$file" >/dev/null 2>&1; then
+        stat -c "%y" "$file" | sed 's/\.[0-9]*//'
+        return 0
+    fi
+
+    echo "date inconnue"
+}
+
+dockerhub_tags_for_env() {
+    local env=$1
+    local repository
+    local api_url
+    local response
+    local tags
+
+    repository=$(get_registry_repository)
+    api_url="https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100"
+
+    response=$(curl -fsSL "$api_url" 2>/dev/null || true)
+    if [ -z "$response" ]; then
+        log_warn "Réponse vide de Docker Hub pour ${repository}" >&2
+        return 1
+    fi
+
+    if ! tags=$(DOCKERHUB_RESPONSE="$response" python3 - "$env" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+env = sys.argv[1]
+
+try:
+    data = json.loads(os.environ.get("DOCKERHUB_RESPONSE", "{}"))
+except Exception:
+    sys.exit(2)
+
+items = data.get("results")
+if not isinstance(items, list):
+    sys.exit(2)
+
+out = []
+for item in items:
+    name = item.get("name", "")
+    if not name.startswith(env + "-"):
+        continue
+
+    raw_date = item.get("tag_last_pushed") or item.get("last_updated") or ""
+    sortable_date = ""
+    display_date = "date inconnue"
+
+    if raw_date:
+        try:
+            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            dt = dt.astimezone(timezone.utc)
+            sortable_date = dt.isoformat()
+            display_date = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            sortable_date = raw_date
+            display_date = raw_date
+
+    out.append((sortable_date, name, display_date))
+
+out.sort(key=lambda row: (row[0], row[1]), reverse=True)
+
+for _, name, display_date in out:
+    print(f"{name}|{display_date}")
+PY
+); then
+        log_warn "Réponse Docker Hub invalide" >&2
+        return 1
+    fi
+
+    [ -n "$tags" ] || return 0
+    printf "%s\n" "$tags"
+}
+
+print_remote_tag_table() {
+    local env=$1
+    local tags=$2
+    local count=1
+    local tag
+    local tag_date
+    local label
+
+    echo -e "${CYAN}Tags disponibles pour ${WHITE}$env${NC}:"
+    echo ""
+    printf "  %-4s %-46s %s\n" "N°" "Tag" "Dernière mise à jour"
+    printf "  %-4s %-46s %s\n" "--" "---" "--------------------"
+
+    while IFS='|' read -r tag tag_date; do
+        [ -n "$tag" ] || continue
+        label="$tag"
+        if [[ "$tag" == *"-latest" ]]; then
+            label="$tag (recommandé)"
+        fi
+        printf "  %-4s %-46s %s\n" "${count})" "$label" "$tag_date"
+        ((count++))
+    done <<< "$tags"
+}
+
+verify_remote_image() {
+    local image_ref=$1
+    local tag="${image_ref##*:}"
+    local repository
+    local api_url
+    local http_code
+    local attempt
+
+    if [ "${REGISTRY_TYPE:-dockerhub}" == "dockerhub" ]; then
+        repository=$(get_registry_repository)
+        api_url="https://hub.docker.com/v2/repositories/${repository}/tags/${tag}"
+
+        for attempt in 1 2 3; do
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" "$api_url" 2>/dev/null || true)
+            if [ "$http_code" == "200" ]; then
+                log_success "Docker Hub confirmé: ${repository}:${tag}"
+                return 0
+            fi
+            [ "$attempt" -lt 3 ] && sleep 2
+        done
+
+        log_warn "Push terminé, mais le tag ${repository}:${tag} n'est pas encore visible via l'API Docker Hub"
+        return 0
+    fi
+
+    if docker manifest inspect "$image_ref" >/dev/null 2>&1; then
+        log_success "Registry confirmé: $image_ref"
+    else
+        log_warn "Push terminé, mais l'image n'est pas encore visible: $image_ref"
+    fi
+}
+
 # ============================================================================
 # GESTION DES PROFILS
 # ============================================================================
@@ -631,8 +791,11 @@ profile_list() {
     local current_marker=""
     local pname
     local pfile
+    local display_file
     for pname in "${profiles[@]}"; do
         pfile="$PROFILES_DIR/${pname}.env"
+        display_file="$pfile"
+        [ -f "$display_file" ] || display_file="$PROFILES_DIR/${pname}.env.encrypted"
         if [ "$pname" == "$CURRENT_PROFILE" ]; then
             current_marker=" ${GREEN}(actif)${NC}"
         else
@@ -656,6 +819,7 @@ profile_list() {
 
         echo -e "  ${CYAN}●${NC} ${WHITE}$pname${NC}$current_marker$encrypted_marker"
         echo -e "    Type: $(get_registry_description "$ptype")"
+        echo -e "    Modifié: $(format_file_mtime "$display_file")"
         echo -e "    Token configuré: $has_token"
         echo ""
     done
@@ -683,12 +847,16 @@ profile_load() {
         local i=1
         local pname
         local ptype
+        local display_file
         for pname in "${profiles[@]}"; do
             ptype=""
             if [ -f "$PROFILES_DIR/${pname}.env" ]; then
                 ptype=$(grep "^REGISTRY_TYPE=" "$PROFILES_DIR/${pname}.env" 2>/dev/null | head -1 | cut -d'=' -f2-)
             fi
             ptype=$(echo "$ptype" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+
+            display_file="$PROFILES_DIR/${pname}.env"
+            [ -f "$display_file" ] || display_file="$PROFILES_DIR/${pname}.env.encrypted"
 
             local encrypted_marker=""
             if [ -f "$PROFILES_DIR/${pname}.env.encrypted" ] && [ ! -f "$PROFILES_DIR/${pname}.env" ]; then
@@ -698,6 +866,7 @@ profile_load() {
 
             printf "  ${CYAN}%d)${NC} ${WHITE}%s${NC}\n" "$i" "$pname"
             printf "     Type: %s%s\n" "$(get_registry_description "$ptype")" "$encrypted_marker"
+            printf "     Modifié: %s\n" "$(format_file_mtime "$display_file")"
             printf "\n"
             ((i++))
         done
@@ -760,9 +929,12 @@ profile_delete() {
 
         local i=1
         local profile_file
+        local display_file
         local pname
         for pname in "${profiles[@]}"; do
             profile_file="$PROFILES_DIR/${pname}.env"
+            display_file="$profile_file"
+            [ -f "$display_file" ] || display_file="$PROFILES_DIR/${pname}.env.encrypted"
             if [ -f "$profile_file" ]; then
                 load_credentials_from_file "$profile_file"
             else
@@ -770,6 +942,7 @@ profile_delete() {
             fi
             printf "  ${CYAN}%d)${NC} ${WHITE}%s${NC}\n" "$i" "$pname"
             printf "     Registry: %s\n" "$(get_registry_description "$REGISTRY_TYPE")"
+            printf "     Modifié: %s\n" "$(format_file_mtime "$display_file")"
             printf "\n"
             ((i++))
         done
@@ -1454,8 +1627,8 @@ cmd_build() {
     log_success "Tags: $version_tag, latest"
 
     # Afficher la taille de l'image
-    log_info "Taille de l'image:"
-    docker images "$full_image_name" --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}"
+    log_info "Image locale créée:"
+    docker images "$full_image_name" --format "table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
 }
 
 # Push une image vers le registry
@@ -1472,10 +1645,12 @@ cmd_push() {
 
     log_info "Push de l'image: $full_image_name"
     docker push "$full_image_name"
+    verify_remote_image "$full_image_name"
 
-    if [ "$version_tag" != "latest" ]; then
+    if [ "$full_image_latest" != "$full_image_name" ]; then
         log_info "Push de l'image: $full_image_latest"
         docker push "$full_image_latest"
+        verify_remote_image "$full_image_latest"
     fi
 
     log_success "Images envoyées au registry"
@@ -1764,6 +1939,10 @@ cmd_build_push_multiarch() {
     log_success "Image multi-architecture construite et pushée avec succès!"
     log_success "Tags: $version_tag, latest"
     log_success "Architectures: $build_platforms"
+    verify_remote_image "$full_image_name"
+    if [ "$full_image_latest" != "$full_image_name" ]; then
+        verify_remote_image "$full_image_latest"
+    fi
 }
 
 # Build et push en une seule commande
@@ -1848,15 +2027,13 @@ cmd_list_remote() {
 
     case "$REGISTRY_TYPE" in
         dockerhub)
-            local api_url="https://registry.hub.docker.com/v2/repositories/${REGISTRY_USERNAME}/${IMAGE_NAME}/tags"
-            local tags=$(curl -s "$api_url" | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | grep "^${env}-")
+            local tags
+            tags=$(dockerhub_tags_for_env "$env" || true)
 
             if [ -z "$tags" ]; then
                 log_warn "Aucun tag trouvé pour l'environnement $env"
             else
-                echo "$tags" | while read tag; do
-                    echo "  - $tag"
-                done
+                print_remote_tag_table "$env" "$tags"
             fi
             ;;
         gitlab)
@@ -2514,11 +2691,15 @@ main() {
     case "$COMMAND" in
         build)
             ENV=${1:-}
-            VERSION=${2:-}
+            [ -n "$ENV" ] && shift || true
+            VERSION=""
             NO_CACHE=false
             USE_GIT=true
             GIT_BRANCH_OVERRIDE=""
-            shift 2 2>/dev/null || shift 1 2>/dev/null || true
+            if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                VERSION="$1"
+                shift
+            fi
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
@@ -2543,13 +2724,17 @@ main() {
             ;;
         release)
             ENV=${1:-}
-            VERSION=${2:-}
+            [ -n "$ENV" ] && shift || true
+            VERSION=""
             NO_CACHE=false
             USE_GIT=true
             GIT_BRANCH_OVERRIDE=""
             PLATFORMS_OVERRIDE=""
             CHOOSE_PLATFORMS=false
-            shift 2 2>/dev/null || shift 1 2>/dev/null || true
+            if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                VERSION="$1"
+                shift
+            fi
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
@@ -2576,13 +2761,17 @@ main() {
             ;;
         build-push-multiarch|multiarch)
             ENV=${1:-}
-            VERSION=${2:-}
+            [ -n "$ENV" ] && shift || true
+            VERSION=""
             NO_CACHE=false
             USE_GIT=true
             GIT_BRANCH_OVERRIDE=""
             PLATFORMS_OVERRIDE=""
             CHOOSE_PLATFORMS=false
-            shift 2 2>/dev/null || shift 1 2>/dev/null || true
+            if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+                VERSION="$1"
+                shift
+            fi
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --no-cache) NO_CACHE=true ;;
