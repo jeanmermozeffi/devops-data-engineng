@@ -582,6 +582,19 @@ verify_remote_image() {
     fi
 }
 
+log_image_tags() {
+    local primary_ref=$1
+    local latest_ref=$2
+    local primary_tag="${primary_ref##*:}"
+    local latest_tag="${latest_ref##*:}"
+
+    if [ "$primary_ref" == "$latest_ref" ]; then
+        log_success "Tag: $primary_tag"
+    else
+        log_success "Tags: $primary_tag, $latest_tag"
+    fi
+}
+
 # ============================================================================
 # GESTION DES PROFILS
 # ============================================================================
@@ -1624,7 +1637,7 @@ cmd_build() {
 
     print_separator
     log_success "Image construite avec succès!"
-    log_success "Tags: $version_tag, latest"
+    log_image_tags "$full_image_name" "$full_image_latest"
 
     # Afficher la taille de l'image
     log_info "Image locale créée:"
@@ -1937,7 +1950,7 @@ cmd_build_push_multiarch() {
     fi
     print_separator
     log_success "Image multi-architecture construite et pushée avec succès!"
-    log_success "Tags: $version_tag, latest"
+    log_image_tags "$full_image_name" "$full_image_latest"
     log_success "Architectures: $build_platforms"
     verify_remote_image "$full_image_name"
     if [ "$full_image_latest" != "$full_image_name" ]; then
