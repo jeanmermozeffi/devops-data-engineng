@@ -225,6 +225,126 @@ confirm() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────
+# SÉLECTEUR INTERACTIF RÉUTILISABLE
+# ─────────────────────────────────────────────────────────────────────
+# Affiche une liste numérotée et retourne la/les sélection(s).
+#
+# Usage:
+#   select_from_list <single|multi> <invite> <élément...>
+#
+# L'utilisateur peut répondre par:
+#   - un numéro             : 3
+#   - plusieurs numéros     : 1 3 5   ou   1,3,5     (mode multi)
+#   - une plage             : 1-3                     (mode multi)
+#   - tout sélectionner     : all | tout | *         (mode multi)
+#   - un nom (exact ou partiel) : .env
+#   - Entrée (vide)         : annuler
+#
+# L'interface (liste + invite) est écrite sur stderr ; la/les valeur(s)
+# choisie(s) sont imprimées sur stdout, une par ligne. Retourne 1 si
+# annulation ou aucune sélection valide.
+#
+# Compatible bash 3.2 (pas de mapfile / declare -A).
+select_from_list() {
+    local mode="$1"; shift
+    local prompt="$1"; shift
+    local items=("$@")
+    local total=${#items[@]}
+    [[ $total -eq 0 ]] && return 1
+
+    local i
+    for ((i=0; i<total; i++)); do
+        printf "  ${COLOR_CYAN}%2d${COLOR_RESET}) %s\n" "$((i+1))" "${items[$i]}" >&2
+    done
+    echo "" >&2
+    if [[ "$mode" == "multi" ]]; then
+        echo -e "${COLOR_YELLOW}↳ numéros (ex: 1 3 5), plage (1-3), 'all'=tout, ou un nom — Entrée=annuler${COLOR_RESET}" >&2
+    else
+        echo -e "${COLOR_YELLOW}↳ un numéro ou un nom — Entrée=annuler${COLOR_RESET}" >&2
+    fi
+
+    local reply
+    read -r -p "$(echo -e "${COLOR_CYAN}${prompt}: ${COLOR_RESET}")" reply
+    [[ -z "$reply" ]] && return 1
+    # Normaliser les séparateurs (virgule -> espace)
+    reply="${reply//,/ }"
+
+    local -a selected=()
+    local token start end n matched
+    for token in $reply; do
+        if [[ "$token" == "all" || "$token" == "tout" || "$token" == "*" ]]; then
+            for ((n=0; n<total; n++)); do selected+=("${items[$n]}"); done
+        elif [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
+            for ((n=start; n<=end; n++)); do
+                [[ $n -ge 1 && $n -le $total ]] && selected+=("${items[$((n-1))]}")
+            done
+        elif [[ "$token" =~ ^[0-9]+$ ]]; then
+            [[ $token -ge 1 && $token -le $total ]] && selected+=("${items[$((token-1))]}")
+        else
+            # Nom: correspondance exacte d'abord, puis partielle
+            matched=""
+            for ((n=0; n<total; n++)); do
+                [[ "${items[$n]}" == "$token" ]] && { matched="${items[$n]}"; break; }
+            done
+            if [[ -z "$matched" ]]; then
+                for ((n=0; n<total; n++)); do
+                    [[ "${items[$n]}" == *"$token"* ]] && { matched="${items[$n]}"; break; }
+                done
+            fi
+            [[ -n "$matched" ]] && selected+=("$matched")
+        fi
+    done
+
+    [[ ${#selected[@]} -eq 0 ]] && return 1
+
+    # Mode single: ne garder que la première sélection
+    if [[ "$mode" == "single" ]]; then
+        echo "${selected[0]}"
+        return 0
+    fi
+
+    # Mode multi: dédoublonner en conservant l'ordre
+    local -a uniq=()
+    local s u found
+    for s in "${selected[@]}"; do
+        found=0
+        for u in "${uniq[@]}"; do
+            [[ "$u" == "$s" ]] && { found=1; break; }
+        done
+        [[ $found -eq 0 ]] && uniq+=("$s")
+    done
+    printf '%s\n' "${uniq[@]}"
+    return 0
+}
+
+# Liste toutes les branches (locales + distantes non trackées), une par ligne.
+# Met à jour les refs distantes au passage. Réutilisé par les sélecteurs de branches.
+list_all_branches() {
+    git fetch origin --prune --quiet 2>/dev/null || true
+    {
+        git branch --format='%(refname:short)'
+        git branch -r --format='%(refname:short)' 2>/dev/null | sed 's|^origin/||' | grep -v '^HEAD$'
+    } | grep -v '^$' | sort -u
+}
+
+# Ajoute une entrée à .gitignore (à la racine du repo) si elle n'y est pas déjà.
+add_to_gitignore() {
+    local entry="$1"
+    [[ -z "$entry" ]] && return 1
+
+    local gitignore
+    gitignore="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gitignore"
+
+    if [[ -f "$gitignore" ]] && grep -qxF "$entry" "$gitignore"; then
+        print_info "Déjà dans .gitignore: $entry"
+        return 0
+    fi
+    echo "$entry" >> "$gitignore"
+    print_success "Ajouté à .gitignore: $entry"
+}
+
 # Vérifie si une branche est une branche de travail (feature/fix/etc.)
 is_work_branch() {
     local branch="$1"
@@ -494,13 +614,18 @@ undo_commit() {
 reset_to_commit() {
     print_header "⏮️  REVENIR À UN COMMIT SPÉCIFIQUE"
 
-    # Afficher l'historique
+    # Historique récent: sélection numérotée, ou repli sur saisie manuelle (hash / HEAD~N)
     print_step "Historique des commits (20 derniers):"
     echo ""
-    git log --oneline --graph --decorate -20
-    echo ""
+    local -a commits=()
+    while IFS= read -r line; do [[ -n "$line" ]] && commits+=("$line"); done < <(git log --oneline -20)
 
-    read -p "$(echo -e "${COLOR_CYAN}Hash du commit (ou nombre de commits en arrière): ${COLOR_RESET}")" target
+    local target="" picked
+    if picked=$(select_from_list single "Commit cible (numéro/hash, ou Entrée=saisie manuelle)" "${commits[@]}"); then
+        target="${picked%% *}"
+    else
+        read -r -p "$(echo -e "${COLOR_CYAN}Hash du commit ou nombre de commits en arrière (vide=annuler): ${COLOR_RESET}")" target
+    fi
 
     if [[ -z "$target" ]]; then
         print_info "Annulé"
@@ -574,75 +699,116 @@ untrack_file() {
     print_info "Cette fonction retire un fichier du suivi Git (tracked → untracked)"
     print_info "Le fichier restera sur votre disque mais ne sera plus versionné"
     echo ""
-
-    # Afficher les fichiers trackés
-    print_step "Fichiers actuellement suivis:"
-    echo ""
-    git ls-files | head -50
-    echo ""
-    print_warning "⚠️  Ajoutez le fichier à .gitignore pour éviter de le tracker à nouveau"
+    print_warning "⚠️  Pensez à l'ajouter à .gitignore pour éviter de le re-tracker"
     echo ""
 
     echo -e "${COLOR_BOLD}Options:${COLOR_RESET}"
-    echo "  1. Untrack un fichier spécifique"
-    echo "  2. Untrack un répertoire"
-    echo "  3. Untrack en gardant dans le cache (--cached)"
+    echo "  1. Untrack un/des fichier(s) spécifique(s)"
+    echo "  2. Untrack un/des répertoire(s)"
+    echo "  3. Untrack par pattern (--cached, ex: '*.log')"
     echo "  4. Annuler"
     echo ""
 
-    read -p "$(echo -e "${COLOR_CYAN}Choisissez (1-4): ${COLOR_RESET}")" choice
+    read -r -p "$(echo -e "${COLOR_CYAN}Choisissez (1-4): ${COLOR_RESET}")" choice
 
     case $choice in
         1)
-            read -p "Chemin du fichier: " filepath
-            if [[ -z "$filepath" ]]; then
-                print_error "Chemin vide"
+            # Liste complète des fichiers suivis (plus de troncature head -50)
+            local -a tracked=()
+            while IFS= read -r f; do [[ -n "$f" ]] && tracked+=("$f"); done < <(git ls-files)
+            if [[ ${#tracked[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier suivi"
                 return
             fi
 
-            if confirm "Retirer '$filepath' du suivi Git (fichier conservé sur disque)?" "y"; then
-                if git rm --cached "$filepath"; then
-                    print_success "Fichier retiré du suivi"
-                    print_info "Ajoutez '$filepath' à .gitignore"
-                    if confirm "Ouvrir .gitignore pour édition?" "n"; then
-                        echo "$filepath" >> .gitignore
-                        print_success "Ajouté à .gitignore"
-                    fi
-                else
-                    print_error "Échec"
-                fi
+            print_step "Fichiers actuellement suivis:"
+            echo ""
+            local -a files=()
+            while IFS= read -r line; do [[ -n "$line" ]] && files+=("$line"); done \
+                < <(select_from_list multi "Fichier(s) à retirer du suivi" "${tracked[@]}")
+            if [[ ${#files[@]} -eq 0 ]]; then
+                print_info "Annulé (aucune sélection)"
+                return
             fi
+
+            echo ""
+            print_info "Sélection (${#files[@]}):"
+            local f
+            for f in "${files[@]}"; do echo "  • $f"; done
+            echo ""
+
+            if ! confirm "Retirer ces ${#files[@]} fichier(s) du suivi (conservés sur disque)?" "y"; then
+                print_info "Annulé"
+                return
+            fi
+
+            local add_ignore=false
+            if confirm "Ajouter aussi ces entrées à .gitignore?" "y"; then add_ignore=true; fi
+
+            for f in "${files[@]}"; do
+                if git rm --cached -- "$f" >/dev/null 2>&1; then
+                    print_success "Retiré du suivi: $f"
+                    [[ "$add_ignore" == true ]] && add_to_gitignore "$f"
+                else
+                    print_warning "Échec pour: $f (ignoré)"
+                fi
+            done
             ;;
         2)
-            read -p "Chemin du répertoire: " dirpath
-            if [[ -z "$dirpath" ]]; then
-                print_error "Chemin vide"
+            # Répertoires suivis (tous les niveaux de préfixe, dédoublonnés)
+            local -a dirs=()
+            while IFS= read -r d; do [[ -n "$d" ]] && dirs+=("$d"); done < <(
+                git ls-files | awk -F/ '{path=""; for(i=1;i<NF;i++){path=(i==1?$i:path"/"$i); print path}}' | sort -u
+            )
+            if [[ ${#dirs[@]} -eq 0 ]]; then
+                print_warning "Aucun répertoire suivi (uniquement des fichiers à la racine)"
                 return
             fi
 
-            if confirm "Retirer '$dirpath/' du suivi Git (répertoire conservé)?" "y"; then
-                if git rm -r --cached "$dirpath"; then
-                    print_success "Répertoire retiré du suivi"
-                    print_info "Ajoutez '$dirpath/' à .gitignore"
-                    if confirm "Ouvrir .gitignore pour édition?" "n"; then
-                        echo "$dirpath/" >> .gitignore
-                        print_success "Ajouté à .gitignore"
-                    fi
-                else
-                    print_error "Échec"
-                fi
+            print_step "Répertoires suivis:"
+            echo ""
+            local -a chosen=()
+            while IFS= read -r line; do [[ -n "$line" ]] && chosen+=("$line"); done \
+                < <(select_from_list multi "Répertoire(s) à retirer du suivi" "${dirs[@]}")
+            if [[ ${#chosen[@]} -eq 0 ]]; then
+                print_info "Annulé (aucune sélection)"
+                return
             fi
+
+            echo ""
+            print_info "Sélection (${#chosen[@]}):"
+            local d
+            for d in "${chosen[@]}"; do echo "  • $d/"; done
+            echo ""
+
+            if ! confirm "Retirer ces ${#chosen[@]} répertoire(s) du suivi (conservés sur disque)?" "y"; then
+                print_info "Annulé"
+                return
+            fi
+
+            local add_ignore=false
+            if confirm "Ajouter aussi ces entrées à .gitignore?" "y"; then add_ignore=true; fi
+
+            for d in "${chosen[@]}"; do
+                if git rm -r --cached -- "$d" >/dev/null 2>&1; then
+                    print_success "Retiré du suivi: $d/"
+                    [[ "$add_ignore" == true ]] && add_to_gitignore "$d/"
+                else
+                    print_warning "Échec pour: $d (ignoré)"
+                fi
+            done
             ;;
         3)
-            read -p "Pattern ou fichier: " pattern
+            read -r -p "$(echo -e "${COLOR_CYAN}Pattern ou fichier (ex: '*.log'): ${COLOR_RESET}")" pattern
             if [[ -z "$pattern" ]]; then
                 print_error "Pattern vide"
                 return
             fi
 
             if confirm "Retirer '$pattern' du suivi (--cached)?" "y"; then
-                if git rm --cached -r "$pattern"; then
+                if git rm --cached -r -- "$pattern"; then
                     print_success "Retiré du suivi"
+                    if confirm "Ajouter '$pattern' à .gitignore?" "y"; then add_to_gitignore "$pattern"; fi
                 else
                     print_error "Échec"
                 fi
@@ -682,14 +848,27 @@ show_log() {
             git log --all --graph --decorate --oneline --color=always -30 | cat
             ;;
         4)
-            read -p "Chemin du fichier: " filepath
-            if [[ -n "$filepath" ]]; then
+            local -a tracked=()
+            while IFS= read -r f; do [[ -n "$f" ]] && tracked+=("$f"); done < <(git ls-files)
+            if [[ ${#tracked[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier suivi"
+            else
+                local filepath
+                filepath=$(select_from_list single "Fichier" "${tracked[@]}") \
+                    || { print_info "Annulé"; return; }
                 git log --oneline --decorate --follow -- "$filepath" | cat
             fi
             ;;
         5)
-            read -p "Nom de l'auteur: " author
-            if [[ -n "$author" ]]; then
+            local -a authors=()
+            while IFS= read -r a; do [[ -n "$a" ]] && authors+=("$a"); done \
+                < <(git shortlog -sne --all 2>/dev/null | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')
+            if [[ ${#authors[@]} -eq 0 ]]; then
+                print_warning "Aucun auteur trouvé"
+            else
+                local author
+                author=$(select_from_list single "Auteur" "${authors[@]}") \
+                    || { print_info "Annulé"; return; }
                 git log --author="$author" --oneline --graph --decorate -20 --color=always | cat
             fi
             ;;
@@ -823,11 +1002,31 @@ discard_changes() {
             fi
             ;;
         2)
-            read -p "Chemin du fichier: " filepath
-            if [[ -n "$filepath" ]]; then
-                if confirm "Annuler les modifications de '$filepath'?" "y"; then
-                    git checkout -- "$filepath"
-                    print_success "Modifications annulées pour $filepath"
+            # Fichiers suivis modifiés (untracked '??' exclus: non restaurables par checkout)
+            local -a modified=()
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && modified+=("${line:3}")
+            done < <(git -c core.quotepath=false status --porcelain | grep -v '^??')
+            if [[ ${#modified[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier modifié suivi"
+                return
+            fi
+
+            print_step "Fichiers modifiés:"
+            echo ""
+            local -a files=()
+            while IFS= read -r f; do [[ -n "$f" ]] && files+=("$f"); done \
+                < <(select_from_list multi "Fichier(s) dont annuler les modifications" "${modified[@]}")
+            if [[ ${#files[@]} -eq 0 ]]; then
+                print_info "Annulé"
+                return
+            fi
+
+            if confirm "Annuler les modifications de ${#files[@]} fichier(s)?" "y"; then
+                if git checkout -- "${files[@]}"; then
+                    print_success "Modifications annulées (${#files[@]} fichier(s))"
+                else
+                    print_error "Échec de l'annulation"
                 fi
             fi
             ;;
@@ -841,14 +1040,41 @@ discard_changes() {
             fi
             ;;
         4)
-            git log --oneline -10
+            # 1) Choisir le commit source dans la liste
+            local -a commits=()
+            while IFS= read -r line; do [[ -n "$line" ]] && commits+=("$line"); done < <(git log --oneline -20)
+            if [[ ${#commits[@]} -eq 0 ]]; then
+                print_warning "Aucun commit"
+                return
+            fi
+            print_step "Choisir le commit source:"
             echo ""
-            read -p "Hash du commit: " commit_hash
-            read -p "Chemin du fichier: " filepath
-            if [[ -n "$commit_hash" ]] && [[ -n "$filepath" ]]; then
-                if confirm "Restaurer '$filepath' depuis $commit_hash?" "y"; then
-                    git checkout "$commit_hash" -- "$filepath"
-                    print_success "Fichier restauré"
+            local commit_line
+            commit_line=$(select_from_list single "Commit" "${commits[@]}") || { print_info "Annulé"; return; }
+            local commit_hash="${commit_line%% *}"
+
+            # 2) Choisir le(s) fichier(s) à restaurer depuis ce commit
+            local -a tree=()
+            while IFS= read -r f; do [[ -n "$f" ]] && tree+=("$f"); done < <(git ls-tree -r --name-only "$commit_hash")
+            if [[ ${#tree[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier dans ce commit"
+                return
+            fi
+            print_step "Fichier(s) à restaurer depuis ${commit_hash}:"
+            echo ""
+            local -a files=()
+            while IFS= read -r f; do [[ -n "$f" ]] && files+=("$f"); done \
+                < <(select_from_list multi "Fichier(s) à restaurer" "${tree[@]}")
+            if [[ ${#files[@]} -eq 0 ]]; then
+                print_info "Annulé"
+                return
+            fi
+
+            if confirm "Restaurer ${#files[@]} fichier(s) depuis ${commit_hash}?" "y"; then
+                if git checkout "$commit_hash" -- "${files[@]}"; then
+                    print_success "Fichier(s) restauré(s) (${#files[@]})"
+                else
+                    print_error "Échec de la restauration"
                 fi
             fi
             ;;
@@ -863,21 +1089,27 @@ delete_branch() {
 
     local current_branch=$(get_current_branch)
 
-    # Lister les branches
-    print_step "Branches locales:"
-    git branch
-    echo ""
+    # Construire la liste des branches locales (hors branche courante)
+    local -a branches=()
+    while IFS= read -r b; do
+        [[ -n "$b" && "$b" != "$current_branch" ]] && branches+=("$b")
+    done < <(git branch --format='%(refname:short)')
 
-    read -p "Nom de la branche à supprimer: " branch_name
-
-    if [[ -z "$branch_name" ]]; then
-        print_error "Nom de branche vide"
+    if [[ ${#branches[@]} -eq 0 ]]; then
+        print_warning "Aucune autre branche locale à supprimer"
+        print_info "Branche actuelle: ${current_branch}"
         return
     fi
 
+    print_step "Branches locales (hors '${current_branch}'):"
+    echo ""
+    local branch_name
+    branch_name=$(select_from_list single "Branche à supprimer" "${branches[@]}") \
+        || { print_info "Annulé"; return; }
+
     if [[ "$branch_name" == "$current_branch" ]]; then
         print_error "Impossible de supprimer la branche actuelle"
-        print_info "Changez d'abord de branche avec l'option 7"
+        print_info "Changez d'abord de branche (option 8)"
         return
     fi
 
@@ -2034,19 +2266,34 @@ git_add() {
             ;;
         3)
             echo ""
-            read -p "$(echo -e "${COLOR_CYAN}Chemin(s) des fichiers (séparés par des espaces): ${COLOR_RESET}")" files
-            if [[ -n "$files" ]]; then
+            # Liste des fichiers modifiés / non suivis (statut retiré: caractères 1-3)
+            local -a changed=()
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && changed+=("${line:3}")
+            done < <(git -c core.quotepath=false status --porcelain)
+            if [[ ${#changed[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier à ajouter"
+                return
+            fi
+
+            print_step "Fichiers modifiés / non suivis:"
+            echo ""
+            local -a files=()
+            while IFS= read -r f; do [[ -n "$f" ]] && files+=("$f"); done \
+                < <(select_from_list multi "Fichier(s) à ajouter" "${changed[@]}")
+
+            if [[ ${#files[@]} -eq 0 ]]; then
+                print_warning "Aucun fichier spécifié"
+            else
                 print_step "Ajout des fichiers spécifiés..."
-                if git add $files; then
-                    print_success "Fichiers ajoutés"
+                if git add -- "${files[@]}"; then
+                    print_success "Fichiers ajoutés (${#files[@]})"
                     echo ""
                     print_step "Fichiers stagés:"
                     git status --short
                 else
                     print_error "Erreur lors de l'ajout des fichiers"
                 fi
-            else
-                print_warning "Aucun fichier spécifié"
             fi
             ;;
         4)
@@ -2292,10 +2539,10 @@ ask_branch_switch() {
             3)
                 echo "" >&2
                 print_step "Branches disponibles:" >&2
-                git branch -a | grep -v "remotes/origin/HEAD" >&2
                 echo "" >&2
-                read -p "$(echo -e "${COLOR_CYAN}Nom de la branche: ${COLOR_RESET}")" chosen_branch
-                chosen_branch=$(echo "$chosen_branch" | sed 's/^[* ]*//' | sed 's/remotes\/origin\///')
+                local -a __branches=()
+                while IFS= read -r __b; do [[ -n "$__b" ]] && __branches+=("$__b"); done < <(list_all_branches)
+                chosen_branch=$(select_from_list single "Branche" "${__branches[@]}") || chosen_branch=""
 
                 if [[ -n "$chosen_branch" ]]; then
                     print_step "Basculement sur ${chosen_branch}..." >&2
@@ -2335,10 +2582,10 @@ ask_branch_switch() {
             2)
                 echo "" >&2
                 print_step "Branches disponibles:" >&2
-                git branch -a | grep -v "remotes/origin/HEAD" >&2
                 echo "" >&2
-                read -p "$(echo -e "${COLOR_CYAN}Nom de la branche: ${COLOR_RESET}")" chosen_branch
-                chosen_branch=$(echo "$chosen_branch" | sed 's/^[* ]*//' | sed 's/remotes\/origin\///')
+                local -a __branches=()
+                while IFS= read -r __b; do [[ -n "$__b" ]] && __branches+=("$__b"); done < <(list_all_branches)
+                chosen_branch=$(select_from_list single "Branche" "${__branches[@]}") || chosen_branch=""
 
                 if [[ -n "$chosen_branch" ]]; then
                     print_step "Basculement sur ${chosen_branch}..." >&2
@@ -2447,82 +2694,70 @@ show_help() {
     echo ""
     echo -e "    ${COLOR_BOLD}${COLOR_CYAN}Développement:${COLOR_RESET}"
     echo -e "    1. Créer une feature branch"
-    echo -e "    2. Merger feature → dev (avec choix de branche après merge)"
+    echo -e "    2. Merger branche de travail → dev (avec choix de branche après merge)"
+    echo -e "    3. Merge flexible (source → cible au choix)"
     echo ""
     echo -e "    ${COLOR_BOLD}${COLOR_CYAN}Opérations Git Basiques:${COLOR_RESET}"
-    echo -e "    3. Add - Ajouter des fichiers au staging"
-    echo -e "    4. Commit - Créer un commit"
-    echo -e "    5. Push - Pousser les changements"
-    echo -e "    6. Pull - Récupérer les changements (merge ou rebase)"
-    echo -e "    7. Changer de branche"
+    echo -e "    4. Add - Ajouter des fichiers au staging (sélection numérotée multi)"
+    echo -e "    5. Commit - Créer un commit"
+    echo -e "    6. Push - Pousser les changements"
+    echo -e "    7. Pull - Récupérer les changements (merge ou rebase)"
+    echo -e "    8. Changer de branche"
     echo ""
-    echo -e "    ${COLOR_BOLD}${COLOR_YELLOW}Opérations Avancées (NOUVEAU):${COLOR_RESET}"
-    echo -e "    8.  ↩️  Annuler un commit"
+    echo -e "    ${COLOR_BOLD}${COLOR_YELLOW}Opérations Avancées:${COLOR_RESET}"
+    echo -e "    9.  ↩️  Annuler un commit"
     echo -e "        • Soft reset (garder changements staged)"
     echo -e "        • Mixed reset (garder changements unstaged)"
     echo -e "        • Hard reset (supprimer changements)"
     echo -e "        • Amend (modifier dernier commit)"
     echo ""
-    echo -e "    9.  ⏮️  Revenir à un commit spécifique"
-    echo -e "        • Par hash de commit"
-    echo -e "        • Par nombre de commits en arrière"
+    echo -e "    10. ⏮️  Revenir à un commit spécifique"
+    echo -e "        • Sélection dans la liste, par hash, ou nombre de commits en arrière"
     echo -e "        • Avec soft/mixed/hard reset"
     echo ""
-    echo -e "    10. 🚫 Annuler le suivi d'un fichier"
-    echo -e "        • Untrack fichier spécifique"
-    echo -e "        • Untrack répertoire"
-    echo -e "        • Ajout automatique à .gitignore"
+    echo -e "    11. 🚫 Annuler le suivi d'un fichier"
+    echo -e "        • Untrack fichier(s) — sélection numérotée multi"
+    echo -e "        • Untrack répertoire(s)"
+    echo -e "        • Ajout automatique (dédoublonné) à .gitignore"
     echo ""
-    echo -e "    11. 📜 Voir l'historique (log)"
+    echo -e "    12. 📜 Voir l'historique (log)"
     echo -e "        • Log standard avec graphique"
     echo -e "        • Log détaillé avec diff"
-    echo -e "        • Log d'un fichier spécifique"
-    echo -e "        • Log par auteur"
+    echo -e "        • Log d'un fichier spécifique (sélection)"
+    echo -e "        • Log par auteur (sélection)"
     echo -e "        • Recherche dans les commits"
     echo ""
-    echo -e "    12. 💼 Stash - Sauvegarder temporairement"
+    echo -e "    13. 💼 Stash - Sauvegarder temporairement"
     echo -e "        • Créer un stash"
     echo -e "        • Lister les stash"
     echo -e "        • Appliquer un stash"
     echo -e "        • Supprimer un stash"
     echo ""
-    echo -e "    13. 🗑️  Annuler les modifications"
+    echo -e "    14. 🗑️  Annuler les modifications"
     echo -e "        • Annuler toutes les modifications"
-    echo -e "        • Annuler un fichier spécifique"
+    echo -e "        • Annuler un/des fichier(s) (sélection numérotée multi)"
     echo -e "        • Nettoyer les fichiers non trackés"
-    echo -e "        • Restaurer depuis un commit"
+    echo -e "        • Restaurer depuis un commit (sélection)"
     echo ""
-    echo -e "    14. 🗑️  Supprimer une branche"
-    echo -e "        • Suppression normale (si mergée)"
-    echo -e "        • Suppression forcée"
+    echo -e "    15. 🗑️  Supprimer une branche"
+    echo -e "        • Sélection numérotée de la branche"
+    echo -e "        • Suppression normale (si mergée) / forcée"
     echo -e "        • Supprimer locale et distante"
     echo ""
     echo -e "    ${COLOR_BOLD}${COLOR_CYAN}Promotion:${COLOR_RESET}"
-    echo -e "    15. Promouvoir dev → staging (avec choix de branche après merge)"
-    echo -e "    16. Promouvoir staging → main (avec choix de branche après merge)"
-    echo -e "    17. Déployer main → prod (avec choix de branche après merge)"
+    echo -e "    16. Promouvoir dev → staging (avec choix de branche après merge)"
+    echo -e "    17. Promouvoir staging → main (avec choix de branche après merge)"
+    echo -e "    18. Déployer main → prod (avec choix de branche après merge)"
     echo ""
     echo -e "    ${COLOR_BOLD}${COLOR_CYAN}Gestion & Tags:${COLOR_RESET}"
-    echo -e "    18. Créer des tags de version (versioning sémantique automatique)"
-    echo -e "    19. Lister les tags"
-    echo -e "    20. Synchroniser une branche"
+    echo -e "    19. Créer un tag de version (versioning sémantique automatique)"
+    echo -e "    20. Lister les tags"
+    echo -e "    21. Synchroniser la branche actuelle"
     echo ""
     echo -e "    ${COLOR_BOLD}${COLOR_CYAN}Informations:${COLOR_RESET}"
-    echo -e "    21. Afficher le statut Git complet"
-    echo -e "    22. Voir l'état des branches"
-    echo ""
-    echo -e "    7. Promouvoir dev → staging (avec choix de branche après merge)"
-    echo -e "    8. Promouvoir staging → main (avec choix de branche après merge)"
-    echo -e "    9. Déployer main → prod (avec choix de branche après merge)"
-    echo ""
-    echo -e "    ${COLOR_BOLD}Gestion:${COLOR_RESET}"
-    echo -e "    10. Créer des tags de version (avec versioning sémantique automatique)"
-    echo -e "    11. Lister les tags"
-    echo -e "    12. Synchroniser une branche"
-    echo ""
-    echo -e "    ${COLOR_BOLD}Informations:${COLOR_RESET}"
-    echo -e "    13. Afficher le statut Git complet"
-    echo -e "    14. Voir l'état des branches"
+    echo -e "    22. Afficher le statut Git complet"
+    echo -e "    23. État des branches principales"
+    echo -e "    24. Aide"
     echo ""
     echo -e "${COLOR_BOLD}NOUVEAU - CHOIX DE BRANCHE APRÈS MERGE:${COLOR_RESET}"
     echo -e "    Après chaque opération de merge (feature→dev, dev→staging, etc.),"
@@ -2534,19 +2769,19 @@ show_help() {
     echo ""
     echo -e "${COLOR_BOLD}EXEMPLES:${COLOR_RESET}"
     echo -e "    # Workflow complet avec nouvelles fonctionnalités"
-    echo -e "    1. Créer feature:      ./git-deploy.sh → Option 1"
-    echo -e "    2. Ajouter fichiers:   ./git-deploy.sh → Option 3 (git add)"
-    echo -e "    3. Commit:             ./git-deploy.sh → Option 4 (git commit)"
-    echo -e "    4. Push:               ./git-deploy.sh → Option 5 (git push)"
-    echo -e "    5. Merger dans dev:    ./git-deploy.sh → Option 2"
+    echo -e "    1. Créer feature:      ./git-deploy → Option 1"
+    echo -e "    2. Ajouter fichiers:   ./git-deploy → Option 4 (git add)"
+    echo -e "    3. Commit:             ./git-deploy → Option 5 (git commit)"
+    echo -e "    4. Push:               ./git-deploy → Option 6 (git push)"
+    echo -e "    5. Merger dans dev:    ./git-deploy → Option 2"
     echo -e "       → Choisir où aller après le merge"
-    echo -e "    6. Pull derniers changes: ./git-deploy.sh → Option 6 (git pull)"
-    echo -e "    7. Promouvoir staging: ./git-deploy.sh → Option 7"
+    echo -e "    6. Pull derniers changes: ./git-deploy → Option 7 (git pull)"
+    echo -e "    7. Promouvoir staging: ./git-deploy → Option 16"
     echo -e "       → Choisir où aller après le merge"
     echo -e "    8. Tests QA"
-    echo -e "    9. Promouvoir main:    ./git-deploy.sh → Option 8"
+    echo -e "    9. Promouvoir main:    ./git-deploy → Option 17"
     echo -e "       → Choisir où aller après le merge"
-    echo -e "    10. Déployer prod:     ./git-deploy.sh → Option 9"
+    echo -e "    10. Déployer prod:     ./git-deploy → Option 18"
     echo -e "        → Choisir où aller après le merge"
     echo ""
     echo -e "${COLOR_BOLD}CONFIGURATION:${COLOR_RESET}"
