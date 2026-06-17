@@ -1,0 +1,259 @@
+# ============================================================================
+# AKILIYA — Template CI complet pour projets FastAPI
+# Repo : akiliya/infra/gitlab-ci-templates
+# ============================================================================
+#
+# Usage minimal dans un projet FastAPI :
+#
+#   include:
+#     - project: 'akiliya/infra/gitlab-ci-templates'
+#       ref: main
+#       file: '/fastapi-pipeline.yml'
+#
+#   variables:
+#     IMAGE_NAME: "mon-projet-api"
+#     PYTHON_VERSION: "3.13"       # optionnel (défaut: 3.13)
+#     APP_ENTRYPOINT: "app.main:app"   # optionnel
+#     PROD_DOMAIN: "api.mon-saas.com"
+#     STAGING_DOMAIN: "staging-api.mon-saas.com"
+#
+# Pré-requis projet :
+#   - pyproject.toml avec extras [dev] (pytest, ruff, mypy, bandit, pip-audit)
+#   - alembic.ini + alembic/ à la racine
+#   - deployment/docker/Dockerfile.{dev,staging,prod}
+#   - deployment/docker-compose.registry.yml
+#   - /health endpoint exposé sur le port 80
+# ============================================================================
+
+include:
+  - local: '/shared-jobs.yml'
+
+stages:
+  - lint
+  - test
+  - security
+  - push
+  - deploy
+  - notify
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables (surchargeables dans le projet)
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  PYTHON_VERSION: "3.13"
+  PYTHON_TEST_VERSIONS: '["3.11", "3.13"]'
+  APP_ENTRYPOINT: "app.main:app"
+  APP_SOURCE_DIR: "app"
+  REGISTRY: "docker.io"
+  REGISTRY_USER: "effijeanmermoz"
+  SERVER_DEPLOY_PATH: "/home/deploy/apps"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        DEPLOY_ENV: "prod"
+        APP_URL: "https://${PROD_DOMAIN}"
+    - if: $CI_COMMIT_BRANCH == "staging"
+      variables:
+        DEPLOY_ENV: "staging"
+        APP_URL: "https://${STAGING_DOMAIN}"
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+        DEPLOY_ENV: "dev"
+        APP_URL: "http://dev-api.${PROD_DOMAIN}"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        DEPLOY_ENV: "none"
+    - if: $CI_COMMIT_BRANCH
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG-python"
+  paths: [.cache/pip]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# lint
+# ─────────────────────────────────────────────────────────────────────────────
+lint:ruff:
+  stage: lint
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --quiet ruff
+  script:
+    - ruff check app/
+    - ruff format --check app/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+lint:mypy:
+  stage: lint
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --quiet -e ".[dev]"
+  script:
+    - mypy app/ --ignore-missing-imports --no-error-summary
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# test — matrice Python + migrations Alembic
+# ─────────────────────────────────────────────────────────────────────────────
+test:pytest:
+  stage: test
+  image: python:${PY_VERSION}-slim
+  parallel:
+    matrix:
+      - PY_VERSION: ["3.11", "3.13"]
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+    - name: redis:7-alpine
+      alias: redis
+  variables:
+    POSTGRES_USER: testuser
+    POSTGRES_PASSWORD: testpass
+    POSTGRES_DB: test_db
+    DATABASE_URL: "postgresql+psycopg2://testuser:testpass@postgres:5432/test_db"
+    REDIS_URL: "redis://redis/0"
+    APP_ENV: "test"
+    SECRET_KEY: "ci-test-secret-not-for-production"
+  before_script:
+    - pip install --quiet -e ".[dev]"
+  script:
+    - pytest tests/ -x -q --tb=short --cov=app --cov-report=term-missing --cov-report=xml
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+test:migrations:
+  stage: test
+  image: python:${PYTHON_VERSION}-slim
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_USER: testuser
+    POSTGRES_PASSWORD: testpass
+    POSTGRES_DB: test_db
+    DATABASE_URL: "postgresql+psycopg2://testuser:testpass@postgres:5432/test_db"
+  before_script:
+    - pip install --quiet -e ".[dev]"
+  script:
+    - alembic upgrade head
+    - alembic downgrade -1
+    - alembic upgrade head
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# security
+# ─────────────────────────────────────────────────────────────────────────────
+security:bandit:
+  stage: security
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --quiet bandit[toml]
+  script:
+    - bandit -r app/ -ll -q
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+security:pip-audit:
+  stage: security
+  image: python:${PYTHON_VERSION}-slim
+  before_script:
+    - pip install --quiet pip-audit .
+  script:
+    - pip-audit --skip-editable
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+security:secrets-scan:
+  extends: .job:secrets-scan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# push — build image Docker (contexte local) + push Docker Hub
+# ─────────────────────────────────────────────────────────────────────────────
+push:image:
+  extends: .job:docker-push
+  variables:
+    DOCKERFILE_PATH: "deployment/docker/Dockerfile.${DEPLOY_ENV}"
+    BUILD_CONTEXT: "."
+    DOCKER_BUILD_ARGS: >-
+      --build-arg APP_SOURCE_DIR=${APP_SOURCE_DIR}
+      --build-arg APP_ENTRYPOINT=${APP_ENTRYPOINT}
+      --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      --build-arg VCS_REF=${CI_COMMIT_SHORT_SHA}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# deploy — migrations Alembic + restart
+# ─────────────────────────────────────────────────────────────────────────────
+deploy:vps:
+  extends: .job:deploy-ssh
+  needs:
+    - job: push:image
+      artifacts: true
+  script:
+    - |
+      CONTAINER="${IMAGE_NAME}-api-${DEPLOY_ENV}"
+      ssh -o StrictHostKeyChecking=no ${VPS_USER}@${VPS_HOST} bash << ENDSSH
+        set -e
+        cd ${SERVER_DEPLOY_PATH}/${CI_PROJECT_NAME}
+        echo "==> Pull ${IMAGE_FULL}:${IMAGE_TAG}"
+        docker pull ${IMAGE_FULL}:${IMAGE_TAG}
+        docker tag ${IMAGE_FULL}:${IMAGE_TAG} ${IMAGE_FULL}:${DEPLOY_ENV}-latest
+
+        echo "==> Migrations Alembic..."
+        ENV=${DEPLOY_ENV} docker compose \
+          -f deployment/docker-compose.registry.yml \
+          -f deployment/docker-compose.${DEPLOY_ENV}-registry.yml \
+          run --rm api alembic upgrade head
+
+        echo "==> Redémarrage..."
+        ENV=${DEPLOY_ENV} docker compose \
+          -f deployment/docker-compose.registry.yml \
+          -f deployment/docker-compose.${DEPLOY_ENV}-registry.yml \
+          up -d --no-build --remove-orphans
+
+        echo "==> Healthcheck (max 90s)..."
+        for i in \$(seq 1 18); do
+          STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER} 2>/dev/null || echo "missing")
+          echo "  [\$i/18] \$STATUS"
+          [ "\$STATUS" = "healthy" ] && exit 0
+          sleep 5
+        done
+        docker logs --tail 50 ${CONTAINER}; exit 1
+      ENDSSH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# notify
+# ─────────────────────────────────────────────────────────────────────────────
+notify:success:
+  extends: .job:notify-success
+
+notify:failure:
+  extends: .job:notify-failure

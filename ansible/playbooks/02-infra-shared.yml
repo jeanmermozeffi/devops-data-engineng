@@ -1,0 +1,114 @@
+---
+# ============================================================================
+# Playbook 02 — Infrastructure partagée (Traefik + PostgreSQL + Redis)
+# ============================================================================
+# Prérequis : 01-base-server.yml exécuté
+#
+# Usage :
+#   ansible-playbook playbooks/02-infra-shared.yml -i inventory/hosts.yml
+#   ansible-playbook playbooks/02-infra-shared.yml -i inventory/hosts.yml \
+#     --extra-vars "@vault.yml" --ask-vault-pass
+#
+# Ce que ça fait :
+#   1. Copie docker-compose.shared.yml + scripts postgres-init sur le VPS
+#   2. Crée .env.infra (secrets injectés depuis Ansible Vault ou vars)
+#   3. Démarre Traefik + PostgreSQL + Redis
+#   4. Vérifie la santé de chaque service
+# ============================================================================
+
+- name: Déploiement infrastructure partagée AKILIYA
+  hosts: production
+  become: false
+  vars_prompt:
+    - name: postgres_superpassword
+      prompt: "Mot de passe PostgreSQL superuser"
+      private: true
+      confirm: true
+    - name: redis_password
+      prompt: "Mot de passe Redis"
+      private: true
+      confirm: true
+    - name: akitext_db_password
+      prompt: "Mot de passe DB AkiText"
+      private: true
+      confirm: true
+    - name: acme_email
+      prompt: "Email Let's Encrypt (ACME)"
+      private: false
+
+  tasks:
+
+    - name: Créer le répertoire infra
+      file:
+        path: "{{ infra_dir }}"
+        state: directory
+        mode: '0750'
+
+    - name: Créer le répertoire scripts postgres-init
+      file:
+        path: "{{ infra_dir }}/scripts/postgres-init"
+        state: directory
+        mode: '0755'
+
+    - name: Copier docker-compose.shared.yml
+      copy:
+        src: "../../shared/docker-compose.shared.yml"
+        dest: "{{ infra_dir }}/docker-compose.shared.yml"
+        mode: '0640'
+
+    - name: Copier les scripts d'initialisation PostgreSQL
+      copy:
+        src: "../../shared/scripts/postgres-init/"
+        dest: "{{ infra_dir }}/scripts/postgres-init/"
+        mode: '0755'
+
+    - name: Créer .env.infra avec les secrets
+      copy:
+        content: |
+          ACME_EMAIL={{ acme_email }}
+          POSTGRES_SUPERUSER=akiliya_admin
+          POSTGRES_SUPERPASSWORD={{ postgres_superpassword }}
+          REDIS_PASSWORD={{ redis_password }}
+          AKITEXT_DB_PASSWORD={{ akitext_db_password }}
+        dest: "{{ infra_dir }}/.env.infra"
+        mode: '0600'
+        owner: "{{ deploy_user }}"
+      no_log: true
+
+    - name: Démarrer l'infrastructure partagée
+      community.docker.docker_compose_v2:
+        project_src: "{{ infra_dir }}"
+        files: ["docker-compose.shared.yml"]
+        env_files: ["{{ infra_dir }}/.env.infra"]
+        state: present
+        pull: always
+
+    - name: Attendre que PostgreSQL soit healthy
+      community.docker.docker_container_info:
+        name: akiliya-postgres
+      register: pg_info
+      until: pg_info.container.State.Health.Status == "healthy"
+      retries: 12
+      delay: 5
+
+    - name: Attendre que Redis soit healthy
+      community.docker.docker_container_info:
+        name: akiliya-redis
+      register: redis_info
+      until: redis_info.container.State.Health.Status == "healthy"
+      retries: 12
+      delay: 5
+
+    - name: Vérifier que Traefik est démarré
+      community.docker.docker_container_info:
+        name: akiliya-traefik
+      register: traefik_info
+
+    - name: Résumé infrastructure
+      debug:
+        msg: |
+          ✅ Infrastructure partagée opérationnelle :
+             - Traefik  : {{ traefik_info.container.State.Status }}
+             - PostgreSQL: {{ pg_info.container.State.Health.Status }}
+             - Redis     : {{ redis_info.container.State.Health.Status }}
+             - Réseau    : akiliya-infra-network

@@ -1,0 +1,30 @@
+---
+# Variables communes à tous les serveurs AKILIYA
+
+# ── Utilisateur de déploiement ───────────────────────────────────────────────
+deploy_user: deploy
+deploy_group: docker
+deploy_home: /home/deploy
+deploy_dirs:
+  - "{{ deploy_home }}/apps"
+  - "{{ deploy_home }}/infra"
+  - "{{ deploy_home }}/backups"
+  - "{{ deploy_home }}/scripts"
+
+# ── SSH hardening ────────────────────────────────────────────────────────────
+ssh_port: 22
+ssh_allow_users: "akiliya deploy"
+
+# ── Firewall UFW ─────────────────────────────────────────────────────────────
+ufw_rules:
+  - { rule: allow, port: "{{ ssh_port }}", proto: tcp, comment: "SSH" }
+  - { rule: allow, port: 80,              proto: tcp, comment: "HTTP → Traefik" }
+  - { rule: allow, port: 443,             proto: tcp, comment: "HTTPS → Traefik" }
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker_version: "5:29.*"
+docker_compose_version: "2.*"
+
+# ── Infra partagée ───────────────────────────────────────────────────────────
+infra_dir: "{{ deploy_home }}/infra"
+infra_compose_file: "docker-compose.shared.yml"

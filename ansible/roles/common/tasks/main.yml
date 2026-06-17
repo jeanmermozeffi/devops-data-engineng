@@ -1,0 +1,83 @@
+---
+# Role : common — Sécurité de base, UFW, fail2ban, updates auto
+
+- name: Mettre à jour apt et installer les paquets essentiels
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+    pkg:
+      - curl
+      - wget
+      - git
+      - htop
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+      - apt-listchanges
+      - chrony
+      - logrotate
+    state: present
+
+- name: Configurer les mises à jour automatiques de sécurité
+  copy:
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: '0644'
+
+- name: Activer unattended-upgrades
+  service:
+    name: unattended-upgrades
+    state: started
+    enabled: true
+
+- name: Configurer UFW — politique par défaut (deny in, allow out)
+  ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+
+- name: Configurer UFW — règles d'ouverture
+  ufw:
+    rule: "{{ item.rule }}"
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ ufw_rules }}"
+  notify: reload ufw
+
+- name: Configurer fail2ban SSH
+  copy:
+    content: |
+      [sshd]
+      enabled = true
+      port = {{ ssh_port }}
+      maxretry = 5
+      findtime = 600
+      bantime = 3600
+      logpath = /var/log/auth.log
+    dest: /etc/fail2ban/jail.d/sshd.conf
+    mode: '0644'
+  notify: restart fail2ban
+
+- name: Activer fail2ban
+  service:
+    name: fail2ban
+    state: started
+    enabled: true
+
+- name: Désactiver le login SSH par mot de passe
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PasswordAuthentication"
+    line: "PasswordAuthentication no"
+    state: present
+  notify: restart sshd
+
+- name: Activer chrony (NTP)
+  service:
+    name: chrony
+    state: started
+    enabled: true

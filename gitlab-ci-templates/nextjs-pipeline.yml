@@ -1,0 +1,187 @@
+# ============================================================================
+# AKILIYA — Template CI complet pour projets Next.js
+# Repo : akiliya/infra/gitlab-ci-templates
+# ============================================================================
+#
+# Usage minimal dans un projet Next.js :
+#
+#   include:
+#     - project: 'akiliya/infra/gitlab-ci-templates'
+#       ref: main
+#       file: '/nextjs-pipeline.yml'
+#
+#   variables:
+#     IMAGE_NAME: "mon-projet-frontend"
+#     NODE_VERSION: "22"           # optionnel (défaut: 22)
+#     PROD_DOMAIN: "app.mon-saas.com"
+#     STAGING_DOMAIN: "staging-app.mon-saas.com"
+#
+# Le pipeline complet s'applique automatiquement.
+# Surcharger uniquement les jobs qui nécessitent un comportement différent.
+# ============================================================================
+
+include:
+  - local: '/shared-jobs.yml'
+
+stages:
+  - lint
+  - build
+  - security
+  - push
+  - deploy
+  - notify
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Variables (surchargeables dans le projet)
+# ─────────────────────────────────────────────────────────────────────────────
+variables:
+  NODE_VERSION: "22"
+  REGISTRY: "docker.io"
+  REGISTRY_USER: "effijeanmermoz"
+  SERVER_DEPLOY_PATH: "/home/deploy/apps"
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      variables:
+        DEPLOY_ENV: "prod"
+        APP_URL: "https://${PROD_DOMAIN}"
+    - if: $CI_COMMIT_BRANCH == "staging"
+      variables:
+        DEPLOY_ENV: "staging"
+        APP_URL: "https://${STAGING_DOMAIN}"
+    - if: $CI_COMMIT_BRANCH == "dev"
+      variables:
+        DEPLOY_ENV: "dev"
+        APP_URL: "http://dev.${PROD_DOMAIN}"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        DEPLOY_ENV: "none"
+    - if: $CI_COMMIT_BRANCH
+
+.npm-cache: &npm-cache
+  cache:
+    key:
+      files: [package-lock.json]
+    paths: [.npm/]
+    policy: pull-push
+
+# ─────────────────────────────────────────────────────────────────────────────
+# lint
+# ─────────────────────────────────────────────────────────────────────────────
+lint:eslint:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  <<: *npm-cache
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+lint:types:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  <<: *npm-cache
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npx tsc --noEmit
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# build — valide que next build passe
+# ─────────────────────────────────────────────────────────────────────────────
+build:validate:
+  stage: build
+  image: node:${NODE_VERSION}-alpine
+  <<: *npm-cache
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run build
+  artifacts:
+    paths: [.next/BUILD_ID]
+    expire_in: 1 hour
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+# ─────────────────────────────────────────────────────────────────────────────
+# security
+# ─────────────────────────────────────────────────────────────────────────────
+security:deps:
+  stage: security
+  image: node:${NODE_VERSION}-alpine
+  <<: *npm-cache
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm audit --audit-level=high --omit=dev
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+security:secrets-scan:
+  extends: .job:secrets-scan
+
+# ─────────────────────────────────────────────────────────────────────────────
+# push — build image Docker (mode clone Git) + push Docker Hub
+# ─────────────────────────────────────────────────────────────────────────────
+push:image:
+  extends: .job:docker-push
+  variables:
+    DOCKERFILE_PATH: "deployment/docker/Dockerfile.${DEPLOY_ENV}.git"
+    BUILD_CONTEXT: "deployment/docker"
+    DOCKER_BUILD_ARGS: >-
+      --build-arg GIT_BRANCH=${CI_COMMIT_BRANCH}
+      --build-arg GIT_REPO=${CI_PROJECT_URL}
+      --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+      --build-arg VCS_REF=${CI_COMMIT_SHORT_SHA}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# deploy — SSH + docker compose up
+# ─────────────────────────────────────────────────────────────────────────────
+deploy:vps:
+  extends: .job:deploy-ssh
+  needs:
+    - job: push:image
+      artifacts: true
+  script:
+    - |
+      CONTAINER="${IMAGE_NAME}-web-${DEPLOY_ENV}"
+      ssh -o StrictHostKeyChecking=no ${VPS_USER}@${VPS_HOST} bash << ENDSSH
+        set -e
+        cd ${SERVER_DEPLOY_PATH}/${CI_PROJECT_NAME}
+        docker pull ${IMAGE_FULL}:${IMAGE_TAG}
+        docker tag ${IMAGE_FULL}:${IMAGE_TAG} ${IMAGE_FULL}:${DEPLOY_ENV}-latest
+        ENV=${DEPLOY_ENV} docker compose \
+          -f deployment/docker-compose.registry.yml \
+          -f deployment/docker-compose.${DEPLOY_ENV}-registry.yml \
+          up -d --no-build --remove-orphans
+        for i in \$(seq 1 12); do
+          STATUS=\$(docker inspect --format='{{.State.Health.Status}}' ${CONTAINER} 2>/dev/null || echo "missing")
+          echo "  [\$i/12] \$STATUS"
+          [ "\$STATUS" = "healthy" ] && exit 0
+          sleep 5
+        done
+        docker logs --tail 50 ${CONTAINER}; exit 1
+      ENDSSH
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+    - if: $CI_COMMIT_BRANCH == "dev"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# notify
+# ─────────────────────────────────────────────────────────────────────────────
+notify:success:
+  extends: .job:notify-success
+
+notify:failure:
+  extends: .job:notify-failure
