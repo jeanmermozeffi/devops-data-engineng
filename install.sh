@@ -24,7 +24,7 @@ set -euo pipefail
 #   --yes
 # ============================================================================
 
-REPO_URL="${DEVOPS_REPO_URL:-https://github.com/jeanmermozeffi/devops-enginering.git}"
+REPO_URL="${DEVOPS_REPO_URL:-https://github.com/jeanmermozeffi/devops-data-engineng.git}"
 DEFAULT_REF="${DEVOPS_REF:-main}"
 MANAGED_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/devops-enginering/repo"
 
