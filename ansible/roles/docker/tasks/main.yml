@@ -1,0 +1,83 @@
+---
+# Role : docker — Installation Docker CE + Compose v2
+
+- name: Installer les dépendances Docker
+  apt:
+    pkg:
+      - ca-certificates
+      - gnupg
+      - lsb-release
+    state: present
+    update_cache: true
+
+- name: Créer le répertoire keyring apt
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Ajouter la clé GPG Docker
+  shell: |
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+
+- name: Ajouter le dépôt Docker (deb822)
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    architectures: [amd64]
+    signed_by: /etc/apt/keyrings/docker.gpg
+    state: present
+    enabled: true
+
+- name: Installer Docker CE + Compose v2
+  apt:
+    pkg:
+      - "docker-ce={{ docker_version }}"
+      - "docker-ce-cli={{ docker_version }}"
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+  notify: restart docker
+
+- name: Activer et démarrer Docker
+  service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Configurer le log driver Docker (json-file, limité à 100M)
+  copy:
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m",
+          "max-file": "3"
+        },
+        "live-restore": true
+      }
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify: restart docker
+
+- name: Ajouter l'utilisateur deploy au groupe docker
+  user:
+    name: "{{ deploy_user }}"
+    groups: docker
+    append: true
+
+- name: Ajouter l'utilisateur courant au groupe docker (si différent de deploy)
+  user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+  when: ansible_user != deploy_user

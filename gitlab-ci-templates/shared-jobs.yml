@@ -1,0 +1,120 @@
+# ============================================================================
+# AKILIYA — Jobs CI partagés (inclus dans tous les projets)
+# Repo : akiliya/infra/gitlab-ci-templates
+# ============================================================================
+#
+# Usage dans un projet :
+#   include:
+#     - project: 'akiliya/infra/gitlab-ci-templates'
+#       ref: main
+#       file: '/shared-jobs.yml'
+# ============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scan de secrets (tous projets, toutes branches)
+# ─────────────────────────────────────────────────────────────────────────────
+.job:secrets-scan:
+  stage: security
+  image:
+    name: trufflesecurity/trufflehog:latest
+    entrypoint: [""]
+  script:
+    - trufflehog git file://. --since-commit HEAD~1 --fail --no-update
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploy SSH générique — réutilisable par nextjs et fastapi
+# Surcharger $DEPLOY_SCRIPT_REMOTE pour personnaliser les commandes distantes
+# ─────────────────────────────────────────────────────────────────────────────
+.job:deploy-ssh:
+  stage: deploy
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache openssh-client bash
+    - eval $(ssh-agent -s)
+    # VPS_SSH_KEY_B64 : clé privée SSH encodée en base64 (contourne la limite GitLab sur les variables masquées)
+    - echo "$VPS_SSH_KEY_B64" | base64 -d | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    - ssh-keyscan -p 22 -H $VPS_HOST >> ~/.ssh/known_hosts 2>/dev/null
+  environment:
+    name: $DEPLOY_ENV
+    url: $APP_URL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Notification Slack — succès
+# ─────────────────────────────────────────────────────────────────────────────
+.job:notify-success:
+  stage: notify
+  image: curlimages/curl:8
+  allow_failure: true
+  when: on_success
+  script:
+    - |
+      curl -s -X POST "$SLACK_WEBHOOK_URL" \
+        -H 'Content-type: application/json' \
+        --data "{
+          \"text\": \"✅ *${CI_PROJECT_NAME}* deployé en *${DEPLOY_ENV}*\n_${CI_COMMIT_MESSAGE}_\nPar: ${GITLAB_USER_NAME} · <${APP_URL}|Voir l'app>\"
+        }"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Notification Slack — échec
+# ─────────────────────────────────────────────────────────────────────────────
+.job:notify-failure:
+  stage: notify
+  image: curlimages/curl:8
+  allow_failure: true
+  when: on_failure
+  script:
+    - |
+      curl -s -X POST "$SLACK_WEBHOOK_URL" \
+        -H 'Content-type: application/json' \
+        --data "{
+          \"text\": \"❌ *${CI_PROJECT_NAME}* ÉCHEC pipeline *${DEPLOY_ENV}*\nCommit: ${CI_COMMIT_SHORT_SHA} par ${GITLAB_USER_NAME}\n<${CI_PIPELINE_URL}|Voir le pipeline>\"
+        }"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "staging"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Push Docker Hub générique
+# Variables attendues : IMAGE_NAME, DOCKERFILE_PATH, BUILD_CONTEXT, DEPLOY_ENV
+# ─────────────────────────────────────────────────────────────────────────────
+.job:docker-push:
+  stage: push
+  image: docker:26
+  services:
+    - name: docker:26-dind
+      command: ["--tls=false"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    REGISTRY: "docker.io"
+    REGISTRY_USER: "effijeanmermoz"
+    BUILD_CONTEXT: "."
+  before_script:
+    - echo "$DOCKER_TOKEN" | docker login $REGISTRY -u $REGISTRY_USER --password-stdin
+    - docker buildx create --use --name ci-builder
+  script:
+    - |
+      IMAGE_FULL="${REGISTRY}/${REGISTRY_USER}/${IMAGE_NAME}"
+      IMAGE_TAG="${DEPLOY_ENV}-${CI_COMMIT_SHORT_SHA}"
+      docker buildx build \
+        --platform linux/amd64 \
+        ${DOCKER_BUILD_ARGS:-} \
+        -f ${DOCKERFILE_PATH} \
+        -t ${IMAGE_FULL}:${IMAGE_TAG} \
+        -t ${IMAGE_FULL}:${DEPLOY_ENV}-latest \
+        --push \
+        ${BUILD_CONTEXT}
+      echo "IMAGE_TAG=${IMAGE_TAG}" >> push.env
+      echo "IMAGE_FULL=${IMAGE_FULL}" >> push.env
+  artifacts:
+    reports:
+      dotenv: push.env

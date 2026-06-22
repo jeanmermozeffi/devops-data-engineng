@@ -1,0 +1,106 @@
+---
+# ============================================================================
+# Playbook 03 — Déploiement initial d'un SaaS sur le VPS
+# ============================================================================
+# Prérequis : 01 et 02 exécutés
+#
+# Usage :
+#   # Déployer AkiText frontend
+#   ansible-playbook playbooks/03-deploy-saas.yml -i inventory/hosts.yml \
+#     -e "saas_name=akitext-plateforme-core env=prod"
+#
+#   # Déployer AkiText backend
+#   ansible-playbook playbooks/03-deploy-saas.yml -i inventory/hosts.yml \
+#     -e "saas_name=akitext-plateforme env=prod"
+#
+# Ce que ça fait :
+#   1. Crée le répertoire du SaaS sur le VPS
+#   2. Clone les fichiers deployment/ depuis Git
+#   3. Crée le .env.<env> (vide — à remplir manuellement)
+#   4. Premier docker pull + docker compose up
+# ============================================================================
+
+- name: Déploiement initial SaaS
+  hosts: production
+  become: false
+  vars:
+    saas_dir: "{{ deploy_home }}/apps/{{ saas_name }}"
+    registry_user: effijeanmermoz
+    registry_url: docker.io
+
+  pre_tasks:
+    - name: Vérifier les variables requises
+      assert:
+        that:
+          - saas_name is defined
+          - env is defined
+        fail_msg: "Variables requises : -e 'saas_name=xxx env=prod'"
+
+  tasks:
+
+    - name: Créer le répertoire du SaaS
+      file:
+        path: "{{ saas_dir }}"
+        state: directory
+        mode: '0750'
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_group }}"
+
+    - name: Créer .env.{{ env }} vide (placeholder)
+      copy:
+        content: |
+          # Fichier .env.{{ env }} pour {{ saas_name }}
+          # Remplir avec les variables runtime avant le premier démarrage
+          # Les NEXT_PUBLIC_* sont baked dans l'image — inutile de les mettre ici
+          JWT_SECRET=CHANGE_ME
+        dest: "{{ saas_dir }}/.env.{{ env }}"
+        force: false
+        mode: '0600'
+        owner: "{{ deploy_user }}"
+
+    - name: Créer .env.key vide (pour devops encrypt)
+      copy:
+        content: ""
+        dest: "{{ saas_dir }}/.env.key"
+        force: false
+        mode: '0600'
+        owner: "{{ deploy_user }}"
+
+    - name: Créer répertoire deployment/docker
+      file:
+        path: "{{ saas_dir }}/deployment/docker"
+        state: directory
+        mode: '0755'
+
+    - name: Copier les fichiers deployment/ depuis le repo local
+      synchronize:
+        src: "{{ lookup('env', 'LOCAL_PROJECT_PATH') }}/deployment/"
+        dest: "{{ saas_dir }}/deployment/"
+        delete: true
+        rsync_opts:
+          - "--exclude=*.env*"
+      when: lookup('env', 'LOCAL_PROJECT_PATH') != ''
+
+    - name: Pull l'image Docker
+      community.docker.docker_image:
+        name: "{{ registry_url }}/{{ registry_user }}/{{ saas_name }}:{{ env }}-latest"
+        source: pull
+        state: present
+
+    - name: Démarrer le service
+      shell: |
+        cd {{ saas_dir }}
+        ENV={{ env }} docker compose \
+          -f deployment/docker-compose.registry.yml \
+          -f deployment/docker-compose.{{ env }}-registry.yml \
+          up -d --no-build
+      args:
+        executable: /bin/bash
+
+    - name: Résumé
+      debug:
+        msg: |
+          ✅ {{ saas_name }} déployé en {{ env }}
+             - Répertoire : {{ saas_dir }}
+             - ⚠️  Vérifier et compléter : {{ saas_dir }}/.env.{{ env }}
+             - Logs : docker logs -f {{ saas_name }}-{{ env }}

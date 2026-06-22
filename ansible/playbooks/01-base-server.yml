@@ -1,0 +1,70 @@
+---
+# ============================================================================
+# Playbook 01 — Configuration de base du serveur
+# ============================================================================
+# Idempotent : peut être rejoué sans risque.
+#
+# Usage :
+#   ansible-playbook playbooks/01-base-server.yml -i inventory/hosts.yml -K
+#
+# Ce que ça fait :
+#   1. Mises à jour système + paquets essentiels
+#   2. Utilisateur deploy (non-root, groupe docker)
+#   3. Firewall UFW (ports 22/80/443 seulement)
+#   4. fail2ban SSH (brute-force protection)
+#   5. Mises à jour automatiques de sécurité
+#   6. Docker CE + Compose v2
+#   7. Structure de répertoires deploy
+# ============================================================================
+
+- name: Configuration de base du serveur AKILIYA
+  hosts: production
+  become: true
+
+  roles:
+    - common
+    - docker
+
+  tasks:
+
+    - name: Créer l'utilisateur deploy
+      user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        groups: "{{ deploy_group }}"
+        append: true
+        create_home: true
+        state: present
+
+    - name: Autoriser la clé SSH du CI pour l'utilisateur deploy
+      authorized_key:
+        user: "{{ deploy_user }}"
+        state: present
+        key: "{{ lookup('env', 'CI_DEPLOY_SSH_PUBKEY') }}"
+      when: lookup('env', 'CI_DEPLOY_SSH_PUBKEY') != ''
+
+    - name: Créer la structure de répertoires
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_group }}"
+        mode: '0750'
+      loop: "{{ deploy_dirs }}"
+
+    - name: Créer le répertoire SSH pour deploy
+      file:
+        path: "{{ deploy_home }}/.ssh"
+        state: directory
+        owner: "{{ deploy_user }}"
+        mode: '0700'
+
+    - name: Afficher le résumé
+      debug:
+        msg: |
+          ✅ Serveur configuré :
+             - Utilisateur deploy créé avec accès Docker
+             - Firewall UFW actif (22/80/443)
+             - fail2ban actif
+             - Docker {{ docker_version }} installé
+             - Structure {{ deploy_home }} créée
