@@ -232,6 +232,14 @@ ensure_command() {
     command -v "$cmd" >/dev/null 2>&1 || die "Commande requise introuvable: $cmd"
 }
 
+normalize_git_url() {
+    local u="$1"
+    u="${u%.git}"
+    u="${u#git@}"; u="${u/://}"
+    u="${u#https://}"; u="${u#http://}"
+    printf "%s" "$u"
+}
+
 detect_origin_url() {
     local repo_dir="$1"
     if [ -d "$repo_dir/.git" ]; then
@@ -337,7 +345,8 @@ prepare_managed_source() {
         local current_remote=""
         local dirty_state=""
         current_remote="$(git -C "$managed_repo_dir" remote get-url origin 2>/dev/null || true)"
-        if [ -n "$current_remote" ] && [ "$current_remote" != "$repo_url" ]; then
+        if [ -n "$current_remote" ] && \
+           [ "$(normalize_git_url "$current_remote")" != "$(normalize_git_url "$repo_url")" ]; then
             die "Le dépôt géré existant utilise '$current_remote'. Choisissez un autre --managed-dir ou alignez --repo-url."
         fi
 

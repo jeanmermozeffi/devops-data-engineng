@@ -39,6 +39,17 @@ _ok()   { printf "%b[OK]%b    %s\n" "$_C_GREEN"  "$_C_RESET" "$*"; }
 _warn() { printf "%b[WARN]%b  %s\n" "$_C_YELLOW" "$_C_RESET" "$*" >&2; }
 _die()  { printf "%b[ERROR]%b %s\n" "$_C_RED"    "$_C_RESET" "$*" >&2; exit 1; }
 
+# Normalise SSH/HTTPS/HTTP en "host/owner/repo" pour comparaison insensible au protocole
+_norm_url() {
+    local u="$1"
+    u="${u%.git}"
+    # git@github.com:user/repo → github.com/user/repo
+    u="${u#git@}"; u="${u/://}"
+    # https://github.com/user/repo → github.com/user/repo
+    u="${u#https://}"; u="${u#http://}"
+    printf "%s" "$u"
+}
+
 # ── Détection: clone local ou bootstrap curl ──────────────────────────────
 
 _LOCAL_DIR=""
@@ -73,9 +84,10 @@ mkdir -p "$(dirname "$MANAGED_DIR")"
 
 if [ -d "$MANAGED_DIR/.git" ]; then
     _current_remote="$(git -C "$MANAGED_DIR" remote get-url origin 2>/dev/null || true)"
-    if [ -n "$_current_remote" ] && [ "$_current_remote" != "$REPO_URL" ]; then
+    if [ -n "$_current_remote" ] && \
+       [ "$(_norm_url "$_current_remote")" != "$(_norm_url "$REPO_URL")" ]; then
         _warn "Le clone managed existant pointe vers: $_current_remote"
-        _warn "Attendu: $REPO_URL"
+        _warn "Attendu (même dépôt, protocole différent accepté): $REPO_URL"
         _warn "Supprimez $MANAGED_DIR et relancez, ou utilisez --repo-url pour aligner."
         exit 1
     fi
