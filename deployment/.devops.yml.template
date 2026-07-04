@@ -8,7 +8,10 @@
 # Nom du projet (utilisé pour les conteneurs, réseaux, volumes)
 project_name: my-project
 
-# Type de stack (ex: fastapi-redis, fastapi-postgres-redis, orchestrator, monitoring)
+# Type de stack. Valeurs supportées :
+#   fastapi-redis, fastapi-postgres-redis, orchestrator, monitoring,
+#   reporting-superset, streaming-kafka (consumers Kafka, sans API HTTP)
+# Si absent, auto-détection via les services compose (repli: fastapi-redis).
 stack_type: fastapi-redis
 
 # Airflow (optionnel, utilisé pour stack_type: orchestrator)

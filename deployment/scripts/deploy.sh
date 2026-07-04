@@ -706,12 +706,20 @@ detect_stack_type_for_env() {
     local workdir=${2:-$(pwd)}
     local services
 
-    case "${STACK_TYPE:-}" in
-        orchestrator|monitoring|reporting-superset|streaming-kafka|fastapi-redis|fastapi-postgres-redis)
-            echo "$STACK_TYPE"
-            return 0
-            ;;
-    esac
+    # N'honorer STACK_TYPE d'emblée que s'il a été défini explicitement
+    # (.devops.yml ou variable d'environnement). Une valeur par défaut posée par
+    # config-loader (STACK_TYPE_EXPLICIT=0) ne doit pas court-circuiter
+    # l'auto-détection ci-dessous — sinon un projet Kafka sans stack_type serait
+    # traité comme « fastapi-redis » (health check HTTP voué à l'échec).
+    # Défaut à 1 si le marqueur est absent : préserve l'ancien comportement.
+    if [ "${STACK_TYPE_EXPLICIT:-1}" = "1" ]; then
+        case "${STACK_TYPE:-}" in
+            orchestrator|monitoring|reporting-superset|streaming-kafka|fastapi-redis|fastapi-postgres-redis)
+                echo "$STACK_TYPE"
+                return 0
+                ;;
+        esac
+    fi
 
     services="$(get_compose_services "$env" "$workdir" 2>/dev/null | tr '\n' ' ')"
 
