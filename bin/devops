@@ -31,6 +31,13 @@ done
 DEVOPS_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)/deployment"
 CURRENT_PROJECT_DIR="$(pwd)"
 
+# Bibliothèque partagée de notification de mise à jour (best-effort, non fatale)
+DEVOPS_BIN_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+if [ -f "$DEVOPS_BIN_DIR/lib/update-notice.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$DEVOPS_BIN_DIR/lib/update-notice.sh" 2>/dev/null || true
+fi
+
 # ============================================================================
 # FONCTIONS D'AFFICHAGE
 # ============================================================================
@@ -1272,6 +1279,9 @@ cmd_help() {
 # ============================================================================
 
 main() {
+    # Notifier si une mise à jour du framework est disponible (throttlé, non fatal)
+    command -v devops_check_updates_auto >/dev/null 2>&1 && devops_check_updates_auto || true
+
     # Si aucun argument, lancer le mode interactif
     if [ $# -eq 0 ]; then
         cmd_interactive

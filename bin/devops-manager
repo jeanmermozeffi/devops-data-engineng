@@ -18,6 +18,13 @@ MANIFEST_FILE="${STATE_DIR}/install.env"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/${APP_ID}"
 DEFAULT_MANAGED_REPO_DIR="${DATA_DIR}/repo"
 
+# Bibliothèque partagée de notification de mise à jour (best-effort, non fatale)
+DEVOPS_APP_ID="$APP_ID"
+if [ -f "$SCRIPT_DIR/lib/update-notice.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$SCRIPT_DIR/lib/update-notice.sh" 2>/dev/null || true
+fi
+
 COLOR_RESET="\033[0m"
 COLOR_RED="\033[0;31m"
 COLOR_GREEN="\033[0;32m"
@@ -541,6 +548,14 @@ check_managed_updates() {
         return
     fi
 
+    # Affichage enrichi (dates, nombre de commits de retard, changelog) via la
+    # bibliothèque partagée lorsqu'elle est disponible.
+    if command -v devops_render_update_notice >/dev/null 2>&1; then
+        devops_render_update_notice "$repo_dir" "$track_ref" "$show_up_to_date" 1 || true
+        return
+    fi
+
+    # Repli minimal si la lib n'a pas pu être chargée.
     if ! command -v git >/dev/null 2>&1; then
         return
     fi
