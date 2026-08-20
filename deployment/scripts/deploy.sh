@@ -548,49 +548,6 @@ confirm_action() {
     fi
 }
 
-# Nettoyer les réseaux Docker avec des labels incorrects
-clean_docker_networks() {
-    local env=$1
-    local prefix
-    prefix="$(get_container_prefix "$env")"
-    local network_name="${prefix}-${env}-network"
-
-    # Vérifier si le réseau existe
-    if docker network ls --format '{{.Name}}' | grep -q "^${network_name}$"; then
-        log_info "Vérification du réseau ${network_name}..."
-
-        # Vérifier si le réseau a un label incorrect
-        local network_label=$(docker network inspect "$network_name" \
-            --format '{{index .Labels "com.docker.compose.network"}}' 2>/dev/null || echo "")
-
-        # Le label attendu devrait être soit vide, soit correspondre au nom du réseau
-        local expected_label="${network_name}"
-
-        if [ -n "$network_label" ] && [ "$network_label" != "$expected_label" ]; then
-            log_warn "Réseau ${network_name} trouvé avec un label incorrect: ${network_label}"
-            log_warn "Label attendu: ${expected_label}"
-
-            # Vérifier s'il y a des conteneurs connectés
-            local connected=$(docker network inspect "$network_name" \
-                --format '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || echo "")
-
-            if [ -n "$connected" ]; then
-                log_warn "Conteneurs connectés: ${connected}"
-                log_info "Déconnexion des conteneurs..."
-
-                # Arrêter les conteneurs connectés
-                for container in $connected; do
-                    docker stop "$container" 2>/dev/null || true
-                done
-            fi
-
-            log_info "Suppression du réseau ${network_name}..."
-            docker network rm "$network_name" 2>/dev/null || true
-            log_success "Réseau nettoyé, il sera recréé avec les bons paramètres"
-        fi
-    fi
-}
-
 # Déterminer les services à build en ne gardant qu'un service par image.
 # Évite les conflits "image already exists" quand plusieurs services partagent la même image.
 get_compose_build_targets_by_unique_image() {
@@ -1101,9 +1058,6 @@ cmd_deploy() {
 
     # Utiliser docker compose down pour nettoyer proprement
     docker compose -f "deployment/docker-compose.yml" -f "deployment/docker-compose.$env.yml" down 2>/dev/null || true
-
-    # Nettoyer les réseaux avec des labels incorrects
-    clean_docker_networks "$env"
 
     # Démarrage
     log_info "Démarrage des conteneurs..."
