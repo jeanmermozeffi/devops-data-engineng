@@ -1,4 +1,4 @@
-# devops-data-engineng
+# devops-engineering
 
 Gestionnaire DevOps Bash avec installation modulaire et mise à jour interactive.
 
@@ -9,6 +9,37 @@ Installer globalement une ou plusieurs parties du projet sans imposer la copie m
 - `deployment` (commande `devops`)
 - `git-devops` (commande `git-deploy` + alias `git deploy`)
 - `all` (les deux)
+
+## Installation rapide (bootstrap, sans clone préalable)
+
+Si vous n'avez **pas encore** cloné le dépôt, n'essayez pas `./install.sh` (le fichier
+n'existe pas sur votre poste). Utilisez le mode bootstrap : le script se clone lui-même puis
+délègue l'installation.
+
+```bash
+# Installation complète, non interactive, depuis main
+curl -fsSL https://raw.githubusercontent.com/jeanmermozeffi/devops-engineering/main/install.sh | bash -s -- \
+  --non-interactive \
+  --scope all \
+  --source managed \
+  --ref main
+```
+
+```bash
+# Version interactive (choix du scope, du bin dir, etc.)
+curl -fsSL https://raw.githubusercontent.com/jeanmermozeffi/devops-engineering/main/install.sh | bash
+```
+
+Points d'attention:
+
+- `bash -s --` est **obligatoire** pour transmettre les options quand le script est lu depuis
+  l'entrée standard (`curl | bash`). Les options placées directement après `bash` seraient
+  ignorées.
+- Le dépôt est cloné dans `~/.local/share/devops-enginering/repo` (ou `XDG_DATA_HOME`).
+- Le dépôt source par défaut est `https://github.com/jeanmermozeffi/devops-engineering.git`.
+  Pour en cibler un autre, ajoutez `--repo-url <url>` ou exportez `DEVOPS_REPO_URL`.
+
+Les sections suivantes (`./install.sh ...`) supposent que vous êtes **dans un clone local** du dépôt.
 
 ## Scripts disponibles
 
