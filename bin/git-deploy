@@ -26,6 +26,21 @@
 
 set -e  # Arrêter en cas d'erreur
 
+# ── Bibliothèque partagée de notification de mise à jour (best-effort) ───────
+# Résout les symlinks pour retrouver le vrai dossier bin/ du framework.
+__gd_sp="${BASH_SOURCE[0]}"
+while [ -L "$__gd_sp" ]; do
+    __gd_dir="$(cd "$(dirname "$__gd_sp")" && pwd)"
+    __gd_sp="$(readlink "$__gd_sp")"
+    [[ "$__gd_sp" != /* ]] && __gd_sp="$__gd_dir/$__gd_sp"
+done
+__gd_dir="$(cd "$(dirname "$__gd_sp")" && pwd)"
+if [ -f "$__gd_dir/lib/update-notice.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$__gd_dir/lib/update-notice.sh" 2>/dev/null || true
+fi
+unset __gd_sp __gd_dir
+
 # ═══════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
@@ -3002,6 +3017,9 @@ interactive_mode() {
 # ═══════════════════════════════════════════════════════════════════════
 
 main() {
+    # Notifier si une mise à jour du framework est disponible (throttlé, non fatal)
+    command -v devops_check_updates_auto >/dev/null 2>&1 && devops_check_updates_auto || true
+
     # Traiter les arguments qui n'ont pas besoin d'un repo Git
     case "${1:-}" in
         --help|-h)

@@ -11,7 +11,7 @@ set -euo pipefail
 #      ./install.sh [options]
 #
 #   2. Bootstrap sans clone préalable (curl | bash):
-#      curl -fsSL https://raw.githubusercontent.com/jeanmermozeffi/devops-enginering/main/install.sh | bash
+#      curl -fsSL https://raw.githubusercontent.com/jeanmermozeffi/devops-engineering/main/install.sh | bash
 #      curl -fsSL .../install.sh | bash -s -- --scope deployment --non-interactive
 #
 # Options transmises à devops-manager install:
@@ -24,7 +24,7 @@ set -euo pipefail
 #   --yes
 # ============================================================================
 
-REPO_URL="${DEVOPS_REPO_URL:-https://github.com/jeanmermozeffi/devops-data-engineng.git}"
+REPO_URL="${DEVOPS_REPO_URL:-https://github.com/jeanmermozeffi/devops-engineering.git}"
 DEFAULT_REF="${DEVOPS_REF:-main}"
 MANAGED_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/devops-enginering/repo"
 

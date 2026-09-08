@@ -425,12 +425,18 @@ load_devops_config() {
     export REDIS_PROD_PORT="${REDIS_PROD_PORT:-6380}"
 
     # Type de stack
+    # STACK_TYPE_EXPLICIT distingue une valeur venue de .devops.yml/env (=1) d'un
+    # simple repli (=0). detect_stack_type_for_env n'honore le court-circuit sur
+    # STACK_TYPE que lorsqu'il est explicite : un repli ne doit pas écraser
+    # l'auto-détection basée sur les services compose (ex: streaming-kafka).
     if [ -z "${STACK_TYPE:-}" ]; then
-        log_warn "stack_type non défini dans .devops.yml — défaut utilisé: fastapi-redis" 2>/dev/null || \
-            echo "[WARN] stack_type non défini dans .devops.yml — défaut utilisé: fastapi-redis" >&2
+        log_warn "stack_type non défini dans .devops.yml — auto-détection via les services compose (repli: fastapi-redis)" 2>/dev/null || \
+            echo "[WARN] stack_type non défini dans .devops.yml — auto-détection via les services compose (repli: fastapi-redis)" >&2
         export STACK_TYPE="fastapi-redis"
+        export STACK_TYPE_EXPLICIT=0
     else
         export STACK_TYPE
+        export STACK_TYPE_EXPLICIT=1
     fi
 
     # Structure du projet
